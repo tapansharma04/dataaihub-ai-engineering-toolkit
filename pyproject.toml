@@ -1,0 +1,76 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+# CANDIDATE PyPI distribution name — verify availability before publishing.
+# Product/CLI brand is Samyak; the distribution name is treated separately and
+# is not claimed to be available on PyPI until actually published.
+name = "samyak"
+version = "0.1.0"
+description = "AI engineering tooling for building reliable AI applications."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+authors = [
+  { name = "DataAIHub" },
+]
+keywords = [
+  "samyak",
+  "ai-engineering",
+  "corpus",
+  "rag",
+  "data-quality",
+  "retrieval-augmented-generation",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Quality Assurance",
+  "Typing :: Typed",
+]
+dependencies = [
+  "pypdf>=5.0",
+  "beautifulsoup4>=4.12",
+]
+
+[project.urls]
+Homepage = "https://www.dataaihub.co"
+
+[project.scripts]
+samyak = "samyak.cli:main"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.6",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/samyak"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src/samyak",
+  "/tests",
+  "/examples",
+  "/README.md",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
