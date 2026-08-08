@@ -10,6 +10,10 @@ Thumbs.db
 # Private data (must never be committed)
 .private/
 
+# Accidental local archives (must never be committed)
+Archive.zip
+*.zip
+
 # Python
 __pycache__/
 *.py[cod]
@@ -23,7 +27,7 @@ venv/
 .env
 .env.*
 
-# Node / JS (for future packages; keep ignores ready, no tooling yet)
+# Node / JS (keep ignores ready; no JS tooling yet)
 node_modules/
 npm-debug.log*
 yarn-debug.log*
