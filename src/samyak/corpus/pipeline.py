@@ -40,10 +40,15 @@ def analyze_corpus(
     Documents are loaded and analyzed one at a time. Full text is not retained
     after each document's checks complete. Cross-document state is limited to
     content hashes, compact HTML fingerprints, counters, and bounded path samples.
+
+    Raises:
+        CorpusPathError: If ``corpus_path`` does not exist or is not a directory.
     """
     cfg = config or AnalysisConfig()
     root = validate_corpus_root(Path(corpus_path))
-    discovered = discover_files(root)
+    discovery = discover_files(root)
+    discovered = discovery.files
+    access_errors = discovery.access_errors
 
     supported = [item for item in discovered if item.supported]
     unsupported = [item for item in discovered if not item.supported]
@@ -94,6 +99,10 @@ def analyze_corpus(
         unsupported_by_extension=dict(sorted(unsupported_by_ext.items())),
         analyzed_by_extension=dict(sorted(acc.analyzed_by_ext.items())),
         load_error_paths=tuple(load_errors[: cfg.max_affected_documents]),
+        discovery_errors=len(access_errors),
+        discovery_error_paths=tuple(
+            item.relative_path for item in access_errors[: cfg.max_affected_documents]
+        ),
     )
 
     findings: list[Finding] = build_findings(acc, cfg)
@@ -125,6 +134,40 @@ def analyze_corpus(
                     "sample_paths": sample[: cfg.max_sample_paths],
                     "affected_document_count": len(unsupported),
                     "affected_documents_truncated": len(unsupported) > len(sample),
+                },
+                affected_documents=tuple(sample),
+            )
+        )
+
+    if access_errors:
+        sample = [item.relative_path for item in access_errors[: cfg.max_affected_documents]]
+        findings.append(
+            Finding(
+                code="DISCOVERY_ERRORS",
+                category="inventory",
+                severity=Severity.MEDIUM,
+                title="Corpus paths could not be accessed",
+                message=(
+                    f"{len(access_errors)} path(s) could not be accessed during "
+                    "corpus discovery. Other documents were still analyzed."
+                ),
+                why_it_matters=(
+                    "Paths that cannot be listed or inspected are missing from analysis "
+                    "and would also be skipped by a naive ingestion pipeline."
+                ),
+                recommendation=(
+                    "Check permissions, mounts, and path availability for the listed "
+                    "locations, then re-run analysis."
+                ),
+                evidence={
+                    "count": len(access_errors),
+                    "sample_paths": sample[: cfg.max_sample_paths],
+                    "sample": [
+                        {"path": item.relative_path, "reason": item.reason}
+                        for item in access_errors[: cfg.max_sample_paths]
+                    ],
+                    "affected_document_count": len(access_errors),
+                    "affected_documents_truncated": len(access_errors) > len(sample),
                 },
                 affected_documents=tuple(sample),
             )
@@ -169,7 +212,7 @@ def analyze_corpus(
         capability=CAPABILITY_NAME,
         version=__version__,
         summary=summary,
-        findings=findings,
+        findings=tuple(findings),
         config=cfg.to_dict(),
     )
 

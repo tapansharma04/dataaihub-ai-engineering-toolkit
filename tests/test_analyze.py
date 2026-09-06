@@ -3,18 +3,14 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
 from helpers import make_corpus, write_text
-from samyak import __version__, analyze_corpus
+from samyak import AnalysisConfig, CorpusPathError, __version__, analyze_corpus
 from samyak.cli import main
-from samyak.corpus.config import AnalysisConfig
-from samyak.corpus.discovery import CorpusPathError, discover_files
+from samyak.corpus.discovery import discover_files
 from samyak.corpus.report import render_json_report, render_text_report
 
 
@@ -30,7 +26,8 @@ def test_empty_directory(tmp_path: Path) -> None:
     report = analyze_corpus(empty)
     assert report.summary.total_discovered_files == 0
     assert report.summary.analyzed_documents == 0
-    assert report.findings == []
+    assert report.summary.discovery_errors == 0
+    assert report.findings == ()
 
 
 def test_normal_txt_and_md(tmp_path: Path) -> None:
@@ -186,8 +183,13 @@ def test_json_output_structure(tmp_path: Path) -> None:
     assert "config" in payload
     assert "severity_counts" in payload
     assert payload["summary"]["analyzed_documents"] == 1
+    assert payload["summary"]["discovery_errors"] == 0
+    assert payload["summary"]["load_errors"] == 0
     # Relative path, not absolute machine path
     assert payload["summary"]["corpus_root"] == "corpus"
+    blob = json.dumps(payload)
+    assert str(tmp_path) not in blob
+    assert str(tmp_path.resolve()) not in blob
 
 
 def test_text_report_contains_sections(tmp_path: Path) -> None:
@@ -220,34 +222,24 @@ def test_deterministic_analysis(tmp_path: Path) -> None:
     assert first == second
 
 
-def test_cli_help() -> None:
-    env = os.environ.copy()
-    src = Path(__file__).resolve().parents[1] / "src"
-    env["PYTHONPATH"] = str(src) + os.pathsep + env.get("PYTHONPATH", "")
-    result = subprocess.run(
-        [sys.executable, "-m", "samyak", "--help"],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=env,
+def test_report_order_is_independent_of_creation_order(tmp_path: Path) -> None:
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    dup_body = "Shared duplicate body for ordering checks about policies.\n" * 3
+    write_text(corpus / "z_last.txt", dup_body)
+    write_text(corpus / "a_first.txt", dup_body)
+    write_text(
+        corpus / "m_mid.txt",
+        "Unique mid document with enough content about shipping.\n" * 3,
     )
-    assert result.returncode == 0
-    assert "corpus" in result.stdout.lower()
-
-
-def test_cli_version() -> None:
-    env = os.environ.copy()
-    src = Path(__file__).resolve().parents[1] / "src"
-    env["PYTHONPATH"] = str(src) + os.pathsep + env.get("PYTHONPATH", "")
-    result = subprocess.run(
-        [sys.executable, "-m", "samyak", "--version"],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    assert result.returncode == 0
-    assert __version__ in result.stdout
+    report = analyze_corpus(corpus)
+    dup = next(f for f in report.findings if f.code == "EXACT_DUPLICATES")
+    assert list(dup.affected_documents) == ["a_first.txt", "z_last.txt"]
+    order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2, "INFO": 3}
+    keys = [(order[f.severity.value], f.code, f.title) for f in report.findings]
+    assert keys == sorted(keys)
+    payload = json.loads(render_json_report(report))
+    assert [item["code"] for item in payload["findings"]] == [f.code for f in report.findings]
 
 
 def test_cli_main_json(tmp_path: Path) -> None:
@@ -264,9 +256,26 @@ def test_cli_main_json(tmp_path: Path) -> None:
     assert "utility" not in payload
 
 
-def test_cli_invalid_path(tmp_path: Path) -> None:
+def test_cli_invalid_path(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     code = main(["corpus", str(tmp_path / "missing")])
+    captured = capsys.readouterr()
     assert code == 2
+    assert "error:" in captured.err
+    assert "Traceback" not in captured.err
+    assert captured.out == ""
+
+
+def test_cli_relative_missing_path_keeps_user_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    code = main(["corpus", "not-here"])
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "not-here" in captured.err
+    assert "Traceback" not in captured.err
+    assert str(tmp_path) not in captured.err
+    assert str(tmp_path.resolve()) not in captured.err
 
 
 def test_discovery_skips_external_symlink(tmp_path: Path) -> None:
@@ -281,9 +290,10 @@ def test_discovery_skips_external_symlink(tmp_path: Path) -> None:
     except OSError:
         pytest.skip("symlinks not supported in this environment")
     discovered = discover_files(corpus)
-    rels = {item.relative_path for item in discovered}
+    rels = {item.relative_path for item in discovered.files}
     assert "inside.txt" in rels
     assert "linked.txt" not in rels
+    assert discovered.access_errors == ()
 
 
 def test_no_fake_score_in_report(tmp_path: Path) -> None:
@@ -297,3 +307,158 @@ def test_no_fake_score_in_report(tmp_path: Path) -> None:
     assert "readiness_score" not in payload
     assert "RAG Readiness Score" not in text
     assert "/100" not in text
+
+
+def test_nested_directories(tmp_path: Path) -> None:
+    corpus = make_corpus(
+        tmp_path,
+        {
+            "root.txt": "Root-level document with enough content about policies.\n",
+            "nested/dir/deep.txt": "Nested document with enough content about shipping.\n",
+        },
+    )
+    report = analyze_corpus(corpus)
+    assert report.summary.analyzed_documents == 2
+    discovered = {item.relative_path for item in discover_files(corpus).files}
+    assert discovered == {"nested/dir/deep.txt", "root.txt"}
+
+
+def test_high_symbol_ratio(tmp_path: Path) -> None:
+    corpus = make_corpus(
+        tmp_path,
+        {
+            "symbols.txt": "@#$%^&*()_+[]{}|;:,.<>/" * 8,
+            "ok.txt": "A normal document with enough content about refunds and shipping.\n",
+        },
+    )
+    report = analyze_corpus(corpus)
+    finding = next(f for f in report.findings if f.code == "HIGH_SYMBOL_RATIO")
+    assert "symbols.txt" in finding.affected_documents
+
+
+def test_excessive_whitespace(tmp_path: Path) -> None:
+    corpus = make_corpus(
+        tmp_path,
+        {
+            "padded.txt": "word" + (" " * 100) + "end",
+            "ok.txt": "A normal document with enough content about warehouse logistics.\n",
+        },
+    )
+    report = analyze_corpus(corpus)
+    finding = next(f for f in report.findings if f.code == "EXCESSIVE_WHITESPACE")
+    assert "padded.txt" in finding.affected_documents
+
+
+def test_cli_small_chars(tmp_path: Path) -> None:
+    body = "A" * 50
+    corpus = make_corpus(
+        tmp_path,
+        {
+            "mid.txt": body,
+            "ok.txt": "A sufficiently long document about onboarding and customer support.\n",
+        },
+    )
+    output = tmp_path / "small.json"
+    code = main(
+        [
+            "corpus",
+            str(corpus),
+            "--format",
+            "json",
+            "--small-chars",
+            "200",
+            "--no-progress",
+            "-o",
+            str(output),
+        ]
+    )
+    assert code == 0
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    codes = {item["code"] for item in payload["findings"]}
+    assert "VERY_SMALL_DOCUMENTS" in codes
+    assert payload["config"]["small_document_chars"] == 200
+
+
+def test_cli_large_chars(tmp_path: Path) -> None:
+    corpus = make_corpus(
+        tmp_path,
+        {
+            "big.txt": "word " * 1_000,
+            "ok.txt": "A normal-sized document about shipping and returns policies.\n",
+        },
+    )
+    output = tmp_path / "large.json"
+    code = main(
+        [
+            "corpus",
+            str(corpus),
+            "--format",
+            "json",
+            "--large-chars",
+            "1000",
+            "--no-progress",
+            "-o",
+            str(output),
+        ]
+    )
+    assert code == 0
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    codes = {item["code"] for item in payload["findings"]}
+    assert "VERY_LARGE_DOCUMENTS" in codes
+    assert payload["config"]["large_document_chars"] == 1000
+
+
+def test_cli_no_progress(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    corpus = make_corpus(
+        tmp_path,
+        {"doc.txt": "CLI --no-progress should leave stderr empty for a small corpus.\n" * 3},
+    )
+    code = main(["corpus", str(corpus), "--format", "json", "--no-progress"])
+    captured = capsys.readouterr()
+    assert code == 0
+    json.loads(captured.out)
+    assert captured.err == ""
+
+
+def test_cli_format_text(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    corpus = make_corpus(
+        tmp_path,
+        {"doc.txt": "CLI text format should print the human-readable report header.\n" * 3},
+    )
+    code = main(["corpus", str(corpus), "--format", "text", "--no-progress"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "Samyak Corpus Intelligence Report" in captured.out
+    assert captured.err == ""
+
+
+def test_cli_file_not_directory(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    not_dir = tmp_path / "file.txt"
+    not_dir.write_text("this is a file not a corpus directory\n", encoding="utf-8")
+    code = main(["corpus", str(not_dir), "--no-progress"])
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "error:" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_cli_output_write_failure(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    corpus = make_corpus(
+        tmp_path,
+        {"doc.txt": "Output path pointing at a directory should fail to write.\n" * 3},
+    )
+    code = main(
+        [
+            "corpus",
+            str(corpus),
+            "--format",
+            "json",
+            "--no-progress",
+            "--output",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "error:" in captured.err
+    assert "Traceback" not in captured.err

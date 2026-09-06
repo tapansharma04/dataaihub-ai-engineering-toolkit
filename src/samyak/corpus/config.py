@@ -6,6 +6,20 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 
+def _require_non_negative_int(name: str, value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be a non-negative integer")
+    if value < 0:
+        raise ValueError(f"{name} must be >= 0")
+
+
+def _require_unit_interval(name: str, value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"{name} must be a number between 0 and 1 inclusive")
+    if not 0.0 <= float(value) <= 1.0:
+        raise ValueError(f"{name} must be between 0 and 1 inclusive")
+
+
 @dataclass(frozen=True, slots=True)
 class AnalysisConfig:
     """Deterministic thresholds for corpus checks.
@@ -71,6 +85,43 @@ class AnalysisConfig:
     html_boilerplate_token_ratio: float = 0.45
     # HTML: large document character threshold (structure-aware chunking).
     html_large_document_chars: int = 80_000
+
+    def __post_init__(self) -> None:
+        _require_non_negative_int("small_document_chars", self.small_document_chars)
+        _require_non_negative_int("large_document_chars", self.large_document_chars)
+        if self.large_document_chars < self.small_document_chars:
+            raise ValueError("large_document_chars must be >= small_document_chars")
+
+        _require_unit_interval("high_symbol_ratio", self.high_symbol_ratio)
+        _require_unit_interval("repeated_line_ratio", self.repeated_line_ratio)
+        _require_non_negative_int("repeated_line_min_lines", self.repeated_line_min_lines)
+        _require_unit_interval("excessive_whitespace_ratio", self.excessive_whitespace_ratio)
+
+        _require_non_negative_int("long_paragraph_chars", self.long_paragraph_chars)
+        _require_non_negative_int("short_line_chars", self.short_line_chars)
+        _require_unit_interval("short_line_ratio", self.short_line_ratio)
+        _require_non_negative_int("short_line_min_lines", self.short_line_min_lines)
+
+        _require_non_negative_int("max_sample_paths", self.max_sample_paths)
+        _require_non_negative_int("max_affected_documents", self.max_affected_documents)
+        _require_non_negative_int("progress_every", self.progress_every)
+
+        _require_non_negative_int("pdf_empty_page_chars", self.pdf_empty_page_chars)
+        _require_unit_interval("pdf_text_poor_page_ratio", self.pdf_text_poor_page_ratio)
+        _require_non_negative_int(
+            "pdf_min_pages_for_distribution", self.pdf_min_pages_for_distribution
+        )
+        _require_unit_interval("pdf_header_footer_page_ratio", self.pdf_header_footer_page_ratio)
+        _require_non_negative_int("pdf_high_page_count", self.pdf_high_page_count)
+        _require_unit_interval("pdf_table_like_line_ratio", self.pdf_table_like_line_ratio)
+        _require_non_negative_int("pdf_table_like_min_lines", self.pdf_table_like_min_lines)
+
+        _require_unit_interval("html_low_content_ratio", self.html_low_content_ratio)
+        _require_non_negative_int(
+            "html_low_content_min_raw_bytes", self.html_low_content_min_raw_bytes
+        )
+        _require_unit_interval("html_boilerplate_token_ratio", self.html_boilerplate_token_ratio)
+        _require_non_negative_int("html_large_document_chars", self.html_large_document_chars)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

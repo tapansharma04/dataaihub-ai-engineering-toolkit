@@ -33,7 +33,7 @@ Corpus Intelligence inspects a local document directory, collects evidence, expl
 - PDF-specific checks (OCR-likely pages, headers/footers, complexity, table-like text)
 - **HTML** local parsing (scripts/styles removed; no network fetches)
 - HTML-specific checks (boilerplate, low content ratio, code-heavy pages)
-- Human-readable CLI report and JSON output
+- Human-readable CLI report, JSON output, and self-contained HTML reports
 - Incremental corpus processing (documents are not all held in memory at once)
 - Progress on stderr for large corpora (`--no-progress` to disable)
 - Fully local analysis — no network, no API keys, no telemetry
@@ -60,9 +60,11 @@ Treat corpus files as untrusted input: contents are never executed or interprete
 | `.html` / `.htm` | Yes (local files via BeautifulSoup; no crawling) |
 | Other formats | Discovered and reported as unsupported (analysis continues) |
 
+Point Samyak at a **document corpus directory**, not a source-code repository. Discovery is recursive and will include unsupported files it finds (for example under `.git` or `node_modules`) as inventory, not as a project linter.
+
 ## Installation
 
-Install from PyPI:
+Install from PyPI to use Samyak:
 
 ```bash
 pip install samyak
@@ -78,6 +80,8 @@ samyak
 
 ## Quick start
 
+Run Corpus Intelligence on a local document directory:
+
 ```bash
 samyak corpus ./documents
 ```
@@ -88,7 +92,13 @@ JSON:
 samyak corpus ./documents --format json
 ```
 
-Write a report file:
+HTML (self-contained file; open locally, no network required):
+
+```bash
+samyak corpus ./documents --format html --output report.html
+```
+
+Write a JSON report file:
 
 ```bash
 samyak corpus ./documents --format json --output report.json
@@ -102,10 +112,12 @@ samyak corpus --help
 samyak --version
 ```
 
-Try the bundled sample corpus:
+The `examples/sample-corpus` directory is in this Git repository (and the source distribution). It is **not** included when you `pip install samyak`. After installing Samyak, clone the repository and analyze the example directory:
 
 ```bash
-samyak corpus examples/sample-corpus
+pip install samyak
+git clone https://github.com/tapansharma04/dataaihub-ai-engineering-toolkit.git
+samyak corpus dataaihub-ai-engineering-toolkit/examples/sample-corpus
 ```
 
 ## Checks implemented
@@ -121,8 +133,10 @@ samyak corpus examples/sample-corpus
 | Chunkability | Long uninterrupted blocks; documents dominated by very short lines |
 | PDF (format-specific) | OCR-likely/text-poor pages, uneven page text, repeated headers/footers, extraction anomalies, large/complex PDFs, table-like text (heuristic) |
 | HTML (format-specific) | Boilerplate domination, low main-content ratio, large pages, code-heavy pages, repeated navigation-like lines |
+| Load failures | Supported files that could not be parsed (analysis continues) |
+| Discovery access failures | Paths that could not be listed or inspected (analysis continues) |
 
-Default thresholds are documented in code (`AnalysisConfig`) and included in JSON output under `config`. Override size thresholds via `--small-chars` / `--large-chars`.
+Default thresholds are documented on `AnalysisConfig` and included in JSON output under `config`. Override size thresholds via `--small-chars` / `--large-chars`.
 
 ## Example output (text)
 
@@ -182,10 +196,20 @@ Example identity fields:
 
 Paths in reports are **relative to the corpus root** whenever possible.
 
+### HTML output
+
+`--format html` renders the same `AnalysisReport` as a standalone HTML page. Open the file in a browser; it requires no network access, JavaScript framework, or external assets.
+
+```bash
+samyak corpus ./documents --format html --output report.html
+```
+
+Omit `--output` to print HTML to stdout (same contract as text and JSON).
+
 Exit codes (v0.1):
 
-- `0` — analysis completed
-- non-zero — invalid path, I/O failure, or other runtime error
+- `0` — analysis completed (findings do not change the exit code)
+- `2` — invalid path, invalid configuration, missing subcommand, or I/O failure writing `--output`
 
 Findings (including `HIGH`) do **not** fail the process by themselves. v0.1 reports findings but does not fail CI based on finding severity.
 
@@ -200,13 +224,18 @@ Keep stdout JSON-only for piping; progress messages go to stderr. Use `--no-prog
 ## Library usage
 
 ```python
-from samyak import analyze_corpus
+from samyak import AnalysisConfig, analyze_corpus
 
 report = analyze_corpus("./documents")
 print(report.product, report.capability, report.version)
 print(report.severity_counts())
 for finding in report.findings:
     print(finding.severity, finding.title, finding.recommendation)
+
+report = analyze_corpus(
+    "./documents",
+    config=AnalysisConfig(small_document_chars=50),
+)
 ```
 
 ## Validation & scale characteristics
@@ -215,13 +244,13 @@ Corpus Intelligence is validated beyond unit tests using public corpora and cont
 
 Documents are processed **incrementally**: peak memory for multi-document corpora is driven primarily by the largest active document plus compact corpus metadata (hashes, counters, bounded finding samples), not by total corpus text size.
 
-Validated on Apple M1, 16 GB RAM, macOS arm64, Python 3.12 (release-candidate measurements for v0.1.0):
+Measured on Apple M1, 16 GB RAM, macOS arm64, Python 3.12 for v0.1.0:
 
 | Scenario | Approximate result |
 | --- | --- |
 | Multi-GB text corpora (≈250 MB → ≈5 GB) | Completes with low hundreds of MB peak RSS (not proportional to full corpus size) |
 | Many small files (up to 100,000 docs) | Completes; runtime scales primarily with file count |
-| Very large individual files (10–250 MB) | Peak RSS scales with the active file (~4.5–8× input size after optimization) |
+| Very large individual files (10–250 MB) | Peak RSS scales with the active file (typically several times the file size) |
 
 Controlled detection validation covers empty documents, exact duplicates, size outliers, fragmentation/noise signals, PDF OCR-likely/text-poor pages, and HTML code-heavy pages. Performance varies by hardware, storage, and document formats. PDF analysis is substantially more expensive than plain text. These figures are measured characteristics, not guarantees.
 
@@ -236,7 +265,8 @@ Controlled detection validation covers empty documents, exact duplicates, size o
 - Findings identify characteristics that **may** cause ingestion/chunking/retrieval problems; they do **not** predict downstream answer quality
 - Thresholds may need adjustment for specialized document collections
 - No single readiness score — findings are evidence-based, not oracles
-- Very large *individual* documents still require memory proportional to that file
+- Very large *individual* documents still require memory proportional to that file (PDF and HTML included)
+- Discovery materializes the list of discovered files; duplicate tracking is proportional to file count
 - Finding path lists in reports are bounded samples; full counts remain in evidence
 - Multi-gigabyte *corpora* are processed incrementally and do not require holding all document text in RAM
 
@@ -246,7 +276,7 @@ Controlled detection validation covers empty documents, exact duplicates, size o
 | --- | --- |
 | [DataAIHub](https://www.dataaihub.co) | Knowledge, ecosystem, research, guides, comparisons, and discovery |
 | [DataAIHub Cookbook](https://github.com/tapansharma04/dataaihub-cookbook) | Practical, runnable examples for learning AI engineering patterns |
-| **Samyak** (this repository) | Open-source AI engineering product; current capability: Corpus Intelligence |
+| **[Samyak](https://github.com/tapansharma04/dataaihub-ai-engineering-toolkit)** (this repository) | Open-source AI engineering product; current capability: Corpus Intelligence |
 
 ## Development
 
@@ -258,6 +288,8 @@ pytest
 ruff check src tests
 ruff format --check src tests
 ```
+
+Tests require the package to be installed (editable is fine) so distribution metadata can be inspected.
 
 ## License
 
