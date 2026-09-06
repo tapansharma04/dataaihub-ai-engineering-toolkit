@@ -3,11 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-# CANDIDATE PyPI distribution name — verify availability before publishing.
-# Product/CLI brand is Samyak; the distribution name is treated separately and
-# is not claimed to be available on PyPI until actually published.
 name = "samyak"
-version = "0.1.0"
+dynamic = ["version"]
 description = "AI engineering tooling for building reliable AI applications."
 readme = "README.md"
 license = "MIT"
@@ -42,6 +39,8 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://www.dataaihub.co"
+Repository = "https://github.com/tapansharma04/dataaihub-ai-engineering-toolkit"
+Issues = "https://github.com/tapansharma04/dataaihub-ai-engineering-toolkit/issues"
 
 [project.scripts]
 samyak = "samyak.cli:main"
@@ -52,6 +51,9 @@ dev = [
   "ruff>=0.6",
 ]
 
+[tool.hatch.version]
+path = "src/samyak/__version__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/samyak"]
 
@@ -61,6 +63,7 @@ include = [
   "/tests",
   "/examples",
   "/README.md",
+  "/LICENSE",
 ]
 
 [tool.pytest.ini_options]

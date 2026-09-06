@@ -89,9 +89,13 @@ class Finding:
         return data
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class CorpusSummary:
-    """High-level corpus inventory statistics."""
+    """High-level corpus inventory statistics.
+
+    Values are snapshots from a completed analysis. Paths in this summary are
+    corpus-relative except ``corpus_root``, which is the directory name only.
+    """
 
     corpus_root: str
     total_discovered_files: int
@@ -108,22 +112,29 @@ class CorpusSummary:
     unsupported_by_extension: dict[str, int] = field(default_factory=dict)
     analyzed_by_extension: dict[str, int] = field(default_factory=dict)
     load_error_paths: tuple[str, ...] = ()
+    discovery_errors: int = 0
+    discovery_error_paths: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["load_error_paths"] = list(self.load_error_paths)
+        data["discovery_error_paths"] = list(self.discovery_error_paths)
         return data
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class AnalysisReport:
-    """Complete analysis result for a corpus."""
+    """Complete analysis result for a corpus.
+
+    Public reports are immutable snapshots: ``findings`` is a tuple ordered by
+    severity, then finding code, then title.
+    """
 
     product: str
     capability: str
     version: str
     summary: CorpusSummary
-    findings: list[Finding]
+    findings: tuple[Finding, ...]
     config: dict[str, Any]
 
     def severity_counts(self) -> dict[str, int]:

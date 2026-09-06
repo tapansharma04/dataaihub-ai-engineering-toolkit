@@ -1,11 +1,30 @@
-"""Human-readable and JSON report rendering."""
+"""Presentation layer for corpus analysis reports.
+
+Formats (text, JSON, HTML) all render the same :class:`AnalysisReport`.
+They do not re-run analysis. Persisting ``report.to_dict()`` is enough for a
+future tool to re-render any of these formats.
+"""
 
 from __future__ import annotations
 
 import json
 from typing import Any
 
+from samyak.corpus.html_report import render_html_report
 from samyak.corpus.models import AnalysisReport, Finding, Severity
+
+REPORT_FORMATS = ("text", "json", "html")
+
+
+def render_report(report: AnalysisReport, fmt: str) -> str:
+    """Render ``report`` as ``text``, ``json``, or ``html``."""
+    if fmt == "json":
+        return render_json_report(report)
+    if fmt == "html":
+        return render_html_report(report)
+    if fmt == "text":
+        return render_text_report(report)
+    raise ValueError(f"Unsupported report format: {fmt}")
 
 
 def render_text_report(report: AnalysisReport) -> str:
@@ -27,6 +46,7 @@ def render_text_report(report: AnalysisReport) -> str:
         f"Unsupported files:        {summary.unsupported_files}",
         f"Documents analyzed:       {summary.analyzed_documents}",
         f"Load errors:              {summary.load_errors}",
+        f"Discovery errors:         {summary.discovery_errors}",
         f"Total characters:         {summary.total_characters}",
         f"Total bytes:              {summary.total_bytes}",
         f"Average characters:       {_fmt_float(summary.average_characters)}",

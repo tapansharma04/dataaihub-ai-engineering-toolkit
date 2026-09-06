@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from helpers import write_text
-from samyak import analyze_corpus
+from samyak import AnalysisConfig, analyze_corpus
+from samyak.cli import main
 from samyak.corpus.discovery import DiscoveredFile
 from samyak.corpus.loaders import load_document
 from samyak.corpus.loaders.pdf import load_pdf_document
@@ -114,6 +117,22 @@ def test_pdf_malformed_does_not_abort_corpus(tmp_path: Path) -> None:
     assert any(f.code == "LOAD_ERRORS" for f in report.findings)
 
 
+def test_malformed_pdf_cli_stderr_has_no_parser_noise(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "bad.pdf").write_bytes(b"%PDF-1.4\nnot a real pdf file")
+    write_text(corpus / "ok.txt", "A normal text document with enough content for analysis.\n")
+    code = main(["corpus", str(corpus), "--format", "json", "--no-progress"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "Traceback" not in captured.err
+    assert "invalid pdf header" not in captured.err.lower()
+    assert "eof marker" not in captured.err.lower()
+    assert captured.err == ""
+
+
 def test_html_article_and_script_stripped(tmp_path: Path) -> None:
     corpus = tmp_path / "corpus"
     corpus.mkdir()
@@ -213,3 +232,60 @@ def test_malformed_html_still_loads(tmp_path: Path) -> None:
     report = analyze_corpus(corpus)
     assert report.summary.analyzed_documents == 1
     assert report.summary.load_errors == 0
+
+
+def test_pdf_repeated_header_footer(tmp_path: Path) -> None:
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    prefix = "RunningHeaderLine" + "X" * (60 - len("RunningHeaderLine"))
+    pages = [prefix + f" body {i} extra unique policy text" for i in range(5)]
+    _write_simple_pdf(corpus / "headers.pdf", pages)
+    _write_simple_pdf(
+        corpus / "ok.pdf",
+        ["A sufficiently long page of born-digital PDF text about policies."] * 2,
+    )
+    report = analyze_corpus(corpus)
+    finding = next(f for f in report.findings if f.code == "PDF_REPEATED_HEADER_FOOTER")
+    assert "headers.pdf" in finding.affected_documents
+
+
+def test_pdf_table_rich(tmp_path: Path) -> None:
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    rows = ["aaaa  bbbb  cccc  dddd"] * 20
+    _write_simple_pdf(corpus / "table.pdf", rows)
+    report = analyze_corpus(corpus)
+    finding = next(f for f in report.findings if f.code == "PDF_TABLE_RICH")
+    assert "table.pdf" in finding.affected_documents
+
+
+def test_html_repeated_navigation(tmp_path: Path) -> None:
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    nav = "Shared Navigation Home Docs API"
+    for i in range(8):
+        write_text(
+            corpus / f"page_{i}.html",
+            f"""
+            <html><body>
+            <p>{nav}</p>
+            <p>Article {i} unique content about policies and retrieval quality.</p>
+            </body></html>
+            """,
+        )
+    report = analyze_corpus(corpus)
+    finding = next(f for f in report.findings if f.code == "HTML_REPEATED_NAVIGATION")
+    assert finding.evidence["affected_document_count"] == 8
+
+
+def test_html_large_document(tmp_path: Path) -> None:
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    body = "Enough HTML article text about documentation corpora. " * 8
+    write_text(
+        corpus / "long.html",
+        f"<html><body><h1>Guide</h1><p>{body}</p></body></html>",
+    )
+    report = analyze_corpus(corpus, config=AnalysisConfig(html_large_document_chars=100))
+    finding = next(f for f in report.findings if f.code == "HTML_LARGE_DOCUMENT")
+    assert "long.html" in finding.affected_documents

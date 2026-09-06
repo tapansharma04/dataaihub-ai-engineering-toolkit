@@ -118,3 +118,15 @@ def test_stats_match_classic_heuristics() -> None:
             assert stats.content_hash == content_hash_normalized(normalize_for_hash(text))
         else:
             assert stats.content_hash is None
+
+
+def test_large_text_stats_path_hash_matches_normalize() -> None:
+    """The memory-conscious scanner starts at 5 MB; keep it equivalent to normalize+hash."""
+    text = "word " * 1_000_000
+    assert len(text) >= 5_000_000
+    stats = collect_text_stats(text, short_line_chars=20)
+    expected = content_hash_normalized(normalize_for_hash(text))
+    assert stats.content_hash == expected
+    assert stats.content_hash == content_hash(text)
+    assert stats.is_empty is False
+    assert stats.non_empty_line_count == 1

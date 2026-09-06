@@ -2,8 +2,6 @@
 
 Current commands:
   samyak corpus <path>   Corpus Intelligence analysis
-
-Future capabilities may add additional top-level subcommands.
 """
 
 from __future__ import annotations
@@ -17,7 +15,7 @@ from samyak.__version__ import __version__
 from samyak.corpus.config import AnalysisConfig
 from samyak.corpus.discovery import CorpusPathError
 from samyak.corpus.pipeline import analyze_corpus, default_progress_callback
-from samyak.corpus.report import render_json_report, render_text_report
+from samyak.corpus.report import REPORT_FORMATS, render_report
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,9 +49,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     corpus.add_argument(
         "--format",
-        choices=("text", "json"),
+        choices=REPORT_FORMATS,
         default="text",
-        help="Output format (default: text)",
+        help="Output format: text, json, or html (default: text)",
     )
     corpus.add_argument(
         "--output",
@@ -90,14 +88,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _run_corpus(args: argparse.Namespace) -> int:
     defaults = AnalysisConfig()
-    config = AnalysisConfig(
-        small_document_chars=(
-            args.small_chars if args.small_chars is not None else defaults.small_document_chars
-        ),
-        large_document_chars=(
-            args.large_chars if args.large_chars is not None else defaults.large_document_chars
-        ),
-    )
+    try:
+        config = AnalysisConfig(
+            small_document_chars=(
+                args.small_chars if args.small_chars is not None else defaults.small_document_chars
+            ),
+            large_document_chars=(
+                args.large_chars if args.large_chars is not None else defaults.large_document_chars
+            ),
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     progress_callback = None
     if not args.no_progress and config.progress_every > 0:
@@ -120,7 +122,7 @@ def _run_corpus(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    rendered = render_json_report(report) if args.format == "json" else render_text_report(report)
+    rendered = render_report(report, args.format)
 
     if args.output:
         output_path = Path(args.output)

@@ -618,7 +618,10 @@ def _html(acc: CorpusAccumulator, config: AnalysisConfig) -> list[Finding]:
                         "repeated_line_groups": len(repeated),
                         "sample_lines": [
                             {"line": k[:120], "count": len(v)}
-                            for k, v in list(repeated.items())[:5]
+                            for k, v in sorted(
+                                repeated.items(),
+                                key=lambda kv: (-len(kv[1]), kv[0]),
+                            )[:5]
                         ],
                         "sample_paths": sample_paths(retained, config),
                         "affected_document_count": len(affected_all),
