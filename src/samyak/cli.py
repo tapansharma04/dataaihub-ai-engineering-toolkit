@@ -2,6 +2,7 @@
 
 Current commands:
   samyak corpus <path>   Corpus Intelligence analysis
+  samyak view            Local run-history viewer
 """
 
 from __future__ import annotations
@@ -9,6 +10,8 @@ from __future__ import annotations
 import argparse
 import functools
 import sys
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 from samyak.__version__ import __version__
@@ -16,6 +19,8 @@ from samyak.corpus.config import AnalysisConfig
 from samyak.corpus.discovery import CorpusPathError
 from samyak.corpus.pipeline import analyze_corpus, default_progress_callback
 from samyak.corpus.report import REPORT_FORMATS, render_report
+from samyak.server.app import DEFAULT_PORT, ViewerBindError, serve_viewer
+from samyak.store.filesystem import FileRunStore
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -81,7 +86,33 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable progress messages on stderr",
     )
+    corpus.add_argument(
+        "--save",
+        action="store_true",
+        help="Save this run to the local Samyak cache for `samyak view`",
+    )
     corpus.set_defaults(handler=_run_corpus)
+
+    view = subparsers.add_parser(
+        "view",
+        help="Open the local run-history viewer",
+        description=(
+            "Start a local web viewer for saved corpus analysis runs. "
+            "The server binds to 127.0.0.1. Data stays on this machine."
+        ),
+    )
+    view.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help=f"Port to listen on (default: {DEFAULT_PORT})",
+    )
+    view.add_argument(
+        "--no-open",
+        action="store_true",
+        help="Print the URL but do not open a browser",
+    )
+    view.set_defaults(handler=_run_view)
 
     return parser
 
@@ -109,6 +140,8 @@ def _run_corpus(args: argparse.Namespace) -> int:
             stream=sys.stderr,
         )
 
+    created_at = datetime.now(UTC)
+    started = time.perf_counter()
     try:
         report = analyze_corpus(
             args.path,
@@ -121,6 +154,26 @@ def _run_corpus(args: argparse.Namespace) -> int:
     except OSError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    completed_at = datetime.now(UTC)
+    duration = time.perf_counter() - started
+
+    save_failed = False
+    if args.save:
+        corpus_label, corpus_path = _local_corpus_location(args.path)
+        try:
+            stored = FileRunStore().save_run(
+                report,
+                duration_seconds=duration,
+                created_at=created_at,
+                completed_at=completed_at,
+                corpus_label=corpus_label,
+                corpus_path=corpus_path,
+            )
+        except OSError as exc:
+            print(f"error: failed to save run: {exc}", file=sys.stderr)
+            save_failed = True
+        else:
+            print(f"Saved run {stored.run_id}. View with: samyak view", file=sys.stderr)
 
     rendered = render_report(report, args.format)
 
@@ -134,6 +187,38 @@ def _run_corpus(args: argparse.Namespace) -> int:
     else:
         sys.stdout.write(rendered)
 
+    return 2 if save_failed else 0
+
+
+def _local_corpus_location(raw: str) -> tuple[str, str]:
+    """Return (basename, absolute path) without extra symlink resolution.
+
+    Analysis already resolves the corpus root to read files. The saved path is
+    the local location the user asked to analyze, made absolute so two folders
+    with the same name can be distinguished later.
+    """
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = path.absolute()
+    return path.name, str(path)
+
+
+def _run_view(args: argparse.Namespace) -> int:
+    if not 1 <= args.port <= 65535:
+        print("error: port must be between 1 and 65535", file=sys.stderr)
+        return 2
+
+    store = FileRunStore()
+    try:
+        serve_viewer(
+            store,
+            host="127.0.0.1",
+            port=args.port,
+            open_browser=not args.no_open,
+        )
+    except ViewerBindError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 

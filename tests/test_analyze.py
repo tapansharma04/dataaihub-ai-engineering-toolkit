@@ -77,6 +77,22 @@ def test_empty_and_whitespace_only(tmp_path: Path) -> None:
     assert empty.evidence["count"] == 2
 
 
+def test_analyze_emits_unique_finding_codes(tmp_path: Path) -> None:
+    corpus = make_corpus(
+        tmp_path,
+        {
+            "empty.txt": "",
+            "ok.txt": "A normal document with enough content about shipping policies.\n" * 3,
+            "dup.txt": "Shared duplicate body about warehouse logistics for pairing.\n" * 3,
+            "dup-copy.txt": "Shared duplicate body about warehouse logistics for pairing.\n" * 3,
+            "skip.docx": "unsupported",
+        },
+    )
+    report = analyze_corpus(corpus)
+    codes = [finding.code for finding in report.findings]
+    assert len(codes) == len(set(codes))
+
+
 def test_very_small_document(tmp_path: Path) -> None:
     corpus = make_corpus(
         tmp_path,

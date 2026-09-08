@@ -20,7 +20,7 @@ Corpus Intelligence inspects a local document directory, collects evidence, expl
 - Data engineers validating knowledge-base handoffs
 - Platform and QA teams adding corpus checks to local workflows or CI
 
-## Features (v0.1)
+## Features (v0.1.1)
 
 - Corpus inventory (supported / unsupported / analyzed, by format)
 - Empty and whitespace-only document detection
@@ -37,6 +37,8 @@ Corpus Intelligence inspects a local document directory, collects evidence, expl
 - Incremental corpus processing (documents are not all held in memory at once)
 - Progress on stderr for large corpora (`--no-progress` to disable)
 - Fully local analysis — no network, no API keys, no telemetry
+- Optional local run history (`--save`) and loopback viewer (`samyak view`)
+- Baseline → current comparison of two saved runs
 
 ## Privacy / local processing
 
@@ -49,6 +51,45 @@ Samyak:
 - requires **no** account and **no** API key
 
 Treat corpus files as untrusted input: contents are never executed or interpreted as instructions.
+
+Saved runs (when you pass `--save`) stay in a local cache directory on this machine. Samyak does not upload them. Run-history metadata may include the local corpus directory path so you can tell identically named folders apart; that path is not added to analysis reports.
+
+## Local Run History
+
+Run History currently lets you save previous analysis runs, reopen them, and compare two saved runs. Comparison is available in the local viewer; it is not a hosted service.
+
+`--save` is **opt-in**. Without it, `samyak corpus PATH` behaves as in v0.1: text, JSON, and HTML reports are unchanged, and nothing is written to the run cache.
+
+```bash
+samyak corpus ./documents --save
+samyak view
+```
+
+`samyak view` starts a local HTTP server on **127.0.0.1** (default port **15500**) and prints a URL such as `http://127.0.0.1:15500/`. The dashboard lists recent saved runs (corpus **basename**, timestamp, run ID, counts, and status). Opening a run shows that run’s metadata — corpus name and the local **corpus path** as separate fields — plus the existing Samyak HTML report, reconstructed from stored JSON. You do not need the original corpus files to still exist, and you do not need to rerun analysis.
+
+To compare two runs, select exactly two rows on the history page and choose **Compare selected runs**. The earlier saved run is the **baseline**; the later run is **current**. Deltas are baseline → current. The comparison page summarizes inventory changes (files discovered/supported/unsupported/analyzed, finding counts, load/discovery errors) and groups findings as new, no longer detected, changed, or unchanged. A finding that is no longer detected was present in the baseline snapshot and absent from the current snapshot; that is not proof the underlying issue was fixed.
+
+Findings are matched by their stable finding **code** (for example `EMPTY_DOCUMENTS`), not by rendered text or list order. Changed findings show what differed (severity, affected documents, recommendation, evidence). If analysis configuration differs, the page shows each changed setting as `baseline → current` so threshold changes are not mistaken for corpus changes.
+
+Comparison reads the saved `AnalysisReport` snapshots. Runs with different report schemas or analysis capabilities cannot be compared. Two runs from different saved corpus locations can be compared, but the page labels that clearly — matching folder names is not treated as the same corpus.
+
+```bash
+samyak view --port 15500
+samyak view --no-open
+```
+
+Data location (on this machine only):
+
+- Default on macOS and Linux: `~/.cache/samyak/`
+- Default on Windows: `%LOCALAPPDATA%\samyak\`
+- Override: `SAMYAK_CACHE_DIR`
+
+Each run is stored as `runs/<run-id>/report.json` and `runs/<run-id>/metadata.json`.
+
+- `report.json` is the existing `AnalysisReport` JSON (document paths stay **corpus-relative**).
+- `metadata.json` is local run-history metadata: timestamps, counts, a corpus **basename**, and the **local corpus directory path** from when `--save` was used. That path is machine-local metadata for distinguishing folders with the same name. It is not included in stdout, `--format json`, `--format html`, or `--output` files.
+
+The viewer binds to loopback only and makes no network requests outside this machine. Nothing is uploaded.
 
 ## Supported formats (v0.1)
 
@@ -98,6 +139,12 @@ HTML (self-contained file; open locally, no network required):
 samyak corpus ./documents --format html --output report.html
 ```
 
+Save a run for the local viewer:
+
+```bash
+samyak corpus ./documents --save
+```
+
 Write a JSON report file:
 
 ```bash
@@ -109,6 +156,7 @@ Help and version:
 ```bash
 samyak --help
 samyak corpus --help
+samyak view --help
 samyak --version
 ```
 
@@ -146,7 +194,7 @@ Samyak Corpus Intelligence Report
 
 Product:                  samyak
 Capability:               corpus
-Version:                  0.1.0
+Version:                  0.1.1
 
 Corpus
 ------
@@ -190,7 +238,7 @@ Example identity fields:
 {
   "product": "samyak",
   "capability": "corpus",
-  "version": "0.1.0"
+  "version": "0.1.1"
 }
 ```
 
@@ -269,6 +317,7 @@ Controlled detection validation covers empty documents, exact duplicates, size o
 - Discovery materializes the list of discovered files; duplicate tracking is proportional to file count
 - Finding path lists in reports are bounded samples; full counts remain in evidence
 - Multi-gigabyte *corpora* are processed incrementally and do not require holding all document text in RAM
+- Local run history is opt-in (`--save`); there is no automatic cleanup yet
 
 ## Samyak by DataAIHub
 
