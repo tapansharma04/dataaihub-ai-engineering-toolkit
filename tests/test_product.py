@@ -37,7 +37,7 @@ PUBLIC_API_NAMES = (
 
 
 def test_package_version_constant() -> None:
-    assert __version__ == "0.1.0"
+    assert __version__ == "0.1.1"
 
 
 def test_installed_package_metadata_matches_version() -> None:
@@ -50,8 +50,8 @@ def test_installed_package_metadata_matches_version() -> None:
             "Install the package before running tests: pip install -e '.[dev]'"
         ) from exc
     assert dist["Name"].lower() == "samyak"
-    assert dist["Version"] == "0.1.0"
-    assert installed == "0.1.0"
+    assert dist["Version"] == "0.1.1"
+    assert installed == "0.1.1"
     assert installed == __version__
 
 
@@ -68,6 +68,14 @@ def test_public_api_exports() -> None:
         "DiscoveredFile",
         "render_html_report",
         "render_report",
+        "RunStore",
+        "FileRunStore",
+        "RunMetadata",
+        "serve_viewer",
+        "ViewerHandler",
+        "compare_runs",
+        "RunComparison",
+        "FindingMatch",
     ):
         assert internal not in samyak.__all__
         assert not hasattr(samyak, internal)
@@ -106,17 +114,17 @@ def test_report_product_capability_identity(tmp_path: Path) -> None:
     payload = json.loads(render_json_report(report))
     assert payload["product"] == "samyak"
     assert payload["capability"] == "corpus"
-    assert payload["version"] == "0.1.0"
+    assert payload["version"] == "0.1.1"
     assert "utility" not in payload
     assert report.product == "samyak"
     assert report.capability == "corpus"
-    assert report.version == "0.1.0"
+    assert report.version == "0.1.1"
 
     text = render_text_report(report)
     assert "Samyak Corpus Intelligence Report" in text
     assert "Product:                  samyak" in text
     assert "Capability:               corpus" in text
-    assert "Version:                  0.1.0" in text
+    assert "Version:                  0.1.1" in text
 
 
 def test_cli_help() -> None:
@@ -132,6 +140,7 @@ def test_cli_help() -> None:
     )
     assert result.returncode == 0
     assert "corpus" in result.stdout.lower()
+    assert "view" in result.stdout.lower()
     assert "Samyak" in result.stdout
 
 
@@ -149,7 +158,24 @@ def test_cli_version() -> None:
     assert result.returncode == 0
     assert "samyak" in result.stdout.lower()
     assert __version__ in result.stdout
-    assert "0.1.0" in result.stdout
+    assert "0.1.1" in result.stdout
+
+
+def test_cli_view_subcommand_help() -> None:
+    env = os.environ.copy()
+    src = Path(__file__).resolve().parents[1] / "src"
+    env["PYTHONPATH"] = str(src) + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [sys.executable, "-m", "samyak", "view", "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 0
+    assert "--port" in result.stdout
+    assert "--no-open" in result.stdout
+    assert "127.0.0.1" in result.stdout
 
 
 def test_cli_corpus_subcommand_help() -> None:
@@ -167,6 +193,7 @@ def test_cli_corpus_subcommand_help() -> None:
     assert "--format" in result.stdout
     assert "--output" in result.stdout
     assert "--no-progress" in result.stdout
+    assert "--save" in result.stdout
     assert "html" in result.stdout
     assert "json" in result.stdout
     assert "text" in result.stdout
@@ -188,7 +215,7 @@ def test_cli_corpus_invocation(tmp_path: Path) -> None:
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["product"] == "samyak"
     assert payload["capability"] == "corpus"
-    assert payload["version"] == "0.1.0"
+    assert payload["version"] == "0.1.1"
     assert "utility" not in payload
 
 

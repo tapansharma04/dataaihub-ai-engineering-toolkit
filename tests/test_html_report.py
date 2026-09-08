@@ -11,6 +11,7 @@ from helpers import make_corpus, write_text
 from samyak import __version__, analyze_corpus
 from samyak.cli import main
 from samyak.corpus.discovery import DiscoveryAccessError, DiscoveryResult, discover_files
+from samyak.corpus.models import AnalysisReport, CorpusSummary, Finding, Severity
 from samyak.corpus.report import render_html_report, render_json_report, render_text_report
 
 
@@ -270,3 +271,99 @@ def test_json_and_text_renderers_unchanged_by_html(tmp_path: Path) -> None:
     assert "Samyak Corpus Intelligence Report" in text
     assert "<!DOCTYPE html>" not in text
     assert "<!DOCTYPE html>" not in payload
+
+
+def _summary() -> CorpusSummary:
+    return CorpusSummary(
+        corpus_root="docs",
+        total_discovered_files=2,
+        supported_files=2,
+        unsupported_files=0,
+        analyzed_documents=2,
+        load_errors=0,
+        total_characters=200,
+        total_bytes=200,
+        average_characters=100.0,
+        median_characters=100.0,
+        min_characters=80,
+        max_characters=120,
+    )
+
+
+def _report_with_evidence(evidence: dict, *, affected: tuple[str, ...] = ()) -> AnalysisReport:
+    return AnalysisReport(
+        product="samyak",
+        capability="corpus",
+        version="0.1.0",
+        summary=_summary(),
+        findings=(
+            Finding(
+                code="EXACT_DUPLICATES",
+                category="duplicates",
+                severity=Severity.HIGH,
+                title="Exact duplicate documents",
+                message="2 documents belong to 1 exact-duplicate group(s).",
+                why_it_matters="Duplicate content can produce redundant retrieval results.",
+                recommendation="Review and remove duplicate documents.",
+                evidence=evidence,
+                affected_documents=affected,
+            ),
+        ),
+        config={"small_document_chars": 100},
+    )
+
+
+def test_nested_duplicate_evidence_layout_and_escaping() -> None:
+    long_path = "deep/" + "very_long_directory_name/" * 8 + 'file_&_lt_<gt>_quote_".txt'
+    unbroken = "A" * 180
+    html = render_html_report(
+        _report_with_evidence(
+            {
+                "duplicate_group_count": 1,
+                "affected_document_count": 2,
+                "groups": [
+                    {
+                        "size": 2,
+                        "representative_path": long_path,
+                        "paths": [long_path, "normal_policy.txt"],
+                        "note": unbroken,
+                    }
+                ],
+                "count": 2,
+                "flag": True,
+                "unsafe": 'a & b <c> "quote"',
+            },
+            affected=(long_path, "normal_policy.txt"),
+        )
+    )
+    assert "representative_path" in html
+    assert "duplicate_group_count" in html
+    assert long_path not in html
+    assert "very_long_directory_name/" * 8 in html
+    assert "file_&amp;_lt_&lt;gt&gt;_quote_&quot;.txt" in html
+    assert unbroken in html
+    assert "a &amp; b &lt;c&gt; &quot;quote&quot;" in html
+    assert "<gt>" not in html
+    assert html.count("<dt>count</dt>") == 1
+    assert "true" in html
+    style = html.split("<style>", 1)[1].split("</style>", 1)[0]
+    assert "minmax(8rem,32%)" not in style
+    assert "dl.nested>div{display:grid;grid-template-columns:minmax(0,1fr)" in style
+    assert "dl.meta>div,dl.evidence>div{display:grid;min-width:0;" in style
+    assert "grid-template-columns:minmax(0,32%) minmax(0,1fr)" in style
+    assert "@media (max-width:40rem){dl.meta>div,dl.evidence>div{" in style
+    assert "dt,dd{min-width:0;overflow-wrap:anywhere}" in style
+    assert "https://" not in html
+
+
+def test_simple_scalar_evidence_stays_definition_list() -> None:
+    html = render_html_report(_report_with_evidence({"count": 2, "threshold": 0}))
+    assert '<dl class="evidence">' in html
+    assert "<dt>count</dt>" in html
+    assert "<dd>2</dd>" in html
+    assert "<dt>threshold</dt>" in html
+    assert "<dd>0</dd>" in html
+    assert '<dl class="nested">' not in html
+    style = html.split("<style>", 1)[1].split("</style>", 1)[0]
+    assert "dl.evidence>div{display:grid;min-width:0;" in style
+    assert "grid-template-columns:minmax(0,32%) minmax(0,1fr)" in style

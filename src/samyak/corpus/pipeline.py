@@ -203,6 +203,7 @@ def analyze_corpus(
         )
 
     findings.sort(key=lambda f: (SEVERITY_ORDER[f.severity], f.code, f.title))
+    # Engine invariant: at most one finding per code (comparison matches on code).
 
     # Release large accumulator structures before returning.
     del acc

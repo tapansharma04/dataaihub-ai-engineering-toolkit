@@ -70,7 +70,12 @@ class Document:
 
 @dataclass(frozen=True, slots=True)
 class Finding:
-    """An explainable corpus issue or observation."""
+    """An explainable corpus issue or observation.
+
+    ``code`` is the stable identifier for a check (for example
+    ``EMPTY_DOCUMENTS``). ``analyze_corpus`` emits at most one finding per
+    code; persisted reports with duplicate codes are rejected on load.
+    """
 
     code: str
     category: str
@@ -127,7 +132,8 @@ class AnalysisReport:
     """Complete analysis result for a corpus.
 
     Public reports are immutable snapshots: ``findings`` is a tuple ordered by
-    severity, then finding code, then title.
+    severity, then finding code, then title. Engine-produced reports contain
+    at most one finding per ``code``.
     """
 
     product: str
