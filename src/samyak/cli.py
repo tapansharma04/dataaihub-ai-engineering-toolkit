@@ -1,8 +1,10 @@
 """Samyak command-line interface.
 
 Current commands:
-  samyak corpus <path>   Corpus Intelligence analysis
-  samyak view            Local run-history viewer
+  samyak corpus <path>          Corpus Intelligence analysis
+  samyak view                   Local workspace (run history and model catalog)
+  samyak model update openai    Refresh the local OpenAI model catalog
+  samyak model update anthropic Refresh the local Anthropic model catalog
 """
 
 from __future__ import annotations
@@ -19,6 +21,12 @@ from samyak.corpus.config import AnalysisConfig
 from samyak.corpus.discovery import CorpusPathError
 from samyak.corpus.pipeline import analyze_corpus, default_progress_callback
 from samyak.corpus.report import REPORT_FORMATS, render_report
+from samyak.model.update import (
+    SUPPORTED_PROVIDERS,
+    CatalogUpdateResult,
+    update_anthropic_catalog,
+    update_openai_catalog,
+)
 from samyak.server.app import DEFAULT_PORT, ViewerBindError, serve_viewer
 from samyak.store.filesystem import FileRunStore
 
@@ -28,7 +36,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="samyak",
         description=(
             "Samyak by DataAIHub — AI engineering tooling for building reliable AI "
-            "applications. Runs entirely offline; no API keys or network access required."
+            "applications. Local by default; `samyak model update` is the only network "
+            "command. No API keys or accounts required."
         ),
     )
     parser.add_argument(
@@ -95,9 +104,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     view = subparsers.add_parser(
         "view",
-        help="Open the local run-history viewer",
+        help="Open the local Samyak workspace",
         description=(
-            "Start a local web viewer for saved corpus analysis runs. "
+            "Start a local web viewer for saved corpus analysis runs and the "
+            "model catalog. Browse Model Intelligence after "
+            "`samyak model update openai` or `samyak model update anthropic`. "
             "The server binds to 127.0.0.1. Data stays on this machine."
         ),
     )
@@ -113,6 +124,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the URL but do not open a browser",
     )
     view.set_defaults(handler=_run_view)
+
+    model = subparsers.add_parser(
+        "model",
+        help="Local model catalog (Model Intelligence)",
+        description=(
+            "Refresh the local model catalog from official documentation. "
+            "Browse the catalog in `samyak view`. "
+            "`samyak model update` is the network command. "
+            "No API key is required."
+        ),
+    )
+    model.set_defaults(handler=_run_model, model_parser=model)
+    model_sub = model.add_subparsers(dest="model_command")
+    update = model_sub.add_parser(
+        "update",
+        help="Refresh the local catalog from official documentation",
+        description=(
+            "Fetch official provider documentation and merge that provider into "
+            "the local model catalog overlay. No API key is required. "
+            "This command uses the network."
+        ),
+    )
+    update.add_argument(
+        "provider",
+        metavar="PROVIDER",
+        help="Provider to refresh (openai or anthropic)",
+    )
+    update.set_defaults(handler=_run_model_update)
 
     return parser
 
@@ -220,6 +259,51 @@ def _run_view(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     return 0
+
+
+def _run_model(args: argparse.Namespace) -> int:
+    parser = getattr(args, "model_parser", None)
+    if parser is not None:
+        parser.print_help()
+    return 2
+
+
+def _run_model_update(args: argparse.Namespace) -> int:
+    provider = str(args.provider).strip().lower()
+    if provider not in SUPPORTED_PROVIDERS:
+        supported = ", ".join(SUPPORTED_PROVIDERS)
+        print(f"error: unknown provider; supported: {supported}", file=sys.stderr)
+        return 2
+    updater = update_openai_catalog if provider == "openai" else update_anthropic_catalog
+    label = "OpenAI" if provider == "openai" else "Anthropic"
+    try:
+        result = updater()
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if not result.ok or not result.committed:
+        print(f"error: {result.error or f'{label} catalog update failed'}", file=sys.stderr)
+        if result.previous_existed:
+            print("The existing model catalog was not changed.", file=sys.stderr)
+        else:
+            print("No local catalog was written.", file=sys.stderr)
+        return 2
+    sys.stdout.write(_render_update_result(result, label=label))
+    return 0
+
+
+def _render_update_result(result: CatalogUpdateResult, *, label: str) -> str:
+    status = "partial" if result.partial else "complete"
+    lines = [
+        f"Updated {label} model catalog.",
+        f"Models: {result.provider_model_count}",
+        f"Status: {status}",
+    ]
+    if result.partial:
+        lines.append("Some model pages could not be retrieved.")
+        lines.append(f"Notices: {len(result.notices)}")
+    lines.append(f"Catalog: {result.catalog_path}")
+    return "\n".join(lines) + "\n"
 
 
 def main(argv: list[str] | None = None) -> int:

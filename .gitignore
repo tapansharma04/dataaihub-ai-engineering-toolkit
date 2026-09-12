@@ -6,6 +6,7 @@ Thumbs.db
 .idea/
 .vscode/
 *.code-workspace
+.cursor
 
 # Private data (must never be committed)
 .private/
