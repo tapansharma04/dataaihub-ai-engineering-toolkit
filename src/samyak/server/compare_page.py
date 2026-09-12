@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from html import escape
-
 from samyak.comparison.models import (
     CORPUS_CROSS,
     CORPUS_DIFFERENT_NAME_UNCONFIRMED,
@@ -16,6 +14,9 @@ from samyak.comparison.models import (
     RunComparison,
 )
 from samyak.corpus.models import Finding
+from samyak.server.layout import escape_html as _e
+from samyak.server.layout import format_timestamp as _format_timestamp
+from samyak.server.layout import render_page
 from samyak.store.models import StoredRun
 
 
@@ -42,11 +43,16 @@ def render_comparison_page(result: RunComparison) -> str:
             _finding_section("Changed findings", result.changed, empty="No changed findings."),
             _unchanged_section(result.unchanged),
             "<footer>",
-            '<p><a href="/">← Run History</a></p>',
+            '<p><a href="/runs">← Run History</a></p>',
             "</footer>",
         ]
     )
-    return _page(title="Compare runs — Samyak", body=body)
+    return render_page(
+        title="Compare runs — Samyak",
+        body=body,
+        extra_css=_CSS,
+        current="/runs",
+    )
 
 
 def _runs_header(baseline: StoredRun, current: StoredRun, result: RunComparison) -> str:
@@ -258,59 +264,11 @@ def _affected_label(finding: Finding) -> str:
     return f'<p class="muted">Affected documents: {_e(raw)}</p>'
 
 
-def _format_timestamp(value: str) -> str:
-    if value.endswith("+00:00"):
-        return value.removesuffix("+00:00") + " UTC"
-    if value.endswith("Z"):
-        return value.removesuffix("Z") + " UTC"
-    return value
-
-
-def _e(value: object) -> str:
-    return escape(str(value), quote=True)
-
-
-def _page(*, title: str, body: str) -> str:
-    return "\n".join(
-        [
-            "<!DOCTYPE html>",
-            '<html lang="en">',
-            "<head>",
-            '<meta charset="utf-8">',
-            '<meta name="viewport" content="width=device-width, initial-scale=1">',
-            f"<title>{_e(title)}</title>",
-            f"<style>{_CSS}</style>",
-            "</head>",
-            "<body>",
-            body,
-            "</body>",
-            "</html>",
-            "",
-        ]
-    )
-
-
 _CSS = (
-    ":root{color-scheme:light}"
-    "*{box-sizing:border-box}"
-    "html{max-width:100%;overflow-x:hidden}"
-    "body{margin:0 auto;max-width:52rem;width:100%;padding:2rem 1.25rem 3rem;"
-    "font:16px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif;"
-    "color:#1a1a1a;background:#f6f4f0}"
-    "header,section,footer{margin-bottom:2rem}"
-    ".eyebrow{margin:0;letter-spacing:.08em;text-transform:uppercase;"
-    "font-size:.75rem;color:#5c574f}"
-    "h1{margin:.35rem 0 .75rem;font-size:1.85rem}"
-    "h2{margin:0 0 .75rem;font-size:1.2rem;border-bottom:1px solid #d9d3c8;"
-    "padding-bottom:.35rem}"
-    "h3{margin:.2rem 0 .5rem;font-size:1.05rem}"
+    "body{max-width:52rem}"
     "h4{margin:.85rem 0 .35rem;font-size:.85rem;text-transform:uppercase;"
     "letter-spacing:.04em;color:#5c574f}"
-    ".lede,footer p,.muted{color:#5c574f}"
-    ".muted{font-size:.92rem}"
-    "code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;"
-    "font-size:.85em;word-break:break-word}"
-    "a{color:#1d3f6e}"
+    "code{word-break:break-word}"
     ".run-pair{display:grid;gap:1rem}"
     "@media (min-width:40rem){.run-pair{grid-template-columns:1fr 1fr}}"
     ".run-card{background:#fff;border:1px solid #e4ddd2;padding:1rem 1.1rem}"

@@ -6,6 +6,7 @@ import webbrowser
 from contextlib import suppress
 from http.server import ThreadingHTTPServer
 
+from samyak.model.store import FileCatalogStore
 from samyak.server.routes import ViewerHandler
 from samyak.store.filesystem import RunStore
 
@@ -25,6 +26,7 @@ class ViewerServer(ThreadingHTTPServer):
 
 def create_server(
     store: RunStore,
+    catalog_store: FileCatalogStore | None = None,
     *,
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
@@ -32,7 +34,7 @@ def create_server(
     """Create a loopback HTTP server. Does not start serving."""
     if host not in _ALLOWED_HOSTS:
         raise ViewerBindError(f"local viewer only binds to {DEFAULT_HOST}, not {host}")
-    handler = ViewerHandler.with_store(store)
+    handler = ViewerHandler.with_stores(store, catalog_store)
     try:
         return ViewerServer((host, port), handler)
     except OSError as exc:
@@ -47,13 +49,14 @@ def viewer_url(server: ThreadingHTTPServer) -> str:
 
 def serve_viewer(
     store: RunStore,
+    catalog_store: FileCatalogStore | None = None,
     *,
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
     open_browser: bool = True,
 ) -> None:
     """Bind, optionally open a browser, and serve until interrupted."""
-    server = create_server(store, host=host, port=port)
+    server = create_server(store, catalog_store, host=host, port=port)
     url = viewer_url(server)
     print("Samyak local viewer", flush=True)
     print(url, flush=True)

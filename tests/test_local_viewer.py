@@ -117,7 +117,7 @@ def test_index_lists_runs_and_report_route(tmp_path: Path) -> None:
     server, thread = _start_server(store)
     try:
         base = viewer_url(server).rstrip("/")
-        with _get(base + "/") as response:
+        with _get(base + "/runs") as response:
             index = response.read().decode("utf-8")
         assert meta.run_id in index
         assert str(meta.files_discovered) in index
@@ -172,7 +172,7 @@ def test_corrupt_run_does_not_hide_healthy_run(tmp_path: Path) -> None:
     (bad / "metadata.json").write_text("{nope", encoding="utf-8")
     server, thread = _start_server(store)
     try:
-        with _get(viewer_url(server)) as response:
+        with _get(viewer_url(server).rstrip("/") + "/runs") as response:
             index = response.read().decode("utf-8")
         assert healthy.run_id in index
         assert "could not be read" in index
@@ -234,15 +234,24 @@ def test_history_pagination_links(tmp_path: Path) -> None:
         )
     server, thread = _start_server(store)
     try:
-        with _get(viewer_url(server)) as response:
+        with _get(viewer_url(server).rstrip("/") + "/runs") as response:
             first = response.read().decode("utf-8")
         assert "Older runs" in first
-        assert "/?offset=50" in first
+        assert "/runs?offset=50" in first
         assert "Showing 1–50 of 51" in first
-        with _get(viewer_url(server).rstrip("/") + "/?offset=50") as response:
+        with _get(viewer_url(server).rstrip("/") + "/runs?offset=50") as response:
             second = response.read().decode("utf-8")
         assert "Newer runs" in second
         assert "Showing 51–51 of 51" in second
+        conn = http.client.HTTPConnection(*server.server_address[:2], timeout=5)
+        try:
+            conn.request("GET", "/?offset=50")
+            redirected = conn.getresponse()
+            redirected.read()
+            assert redirected.status == 302
+            assert redirected.getheader("Location") == "/runs?offset=50"
+        finally:
+            conn.close()
     finally:
         _stop_server(server, thread)
 
@@ -568,6 +577,8 @@ def test_path_traversal_and_direct_file_requests_are_rejected(tmp_path: Path) ->
             "/runs/not-a-uuid",
             "/compare/../etc/passwd",
             "/compare/%2e%2e/etc/passwd",
+            "/models/../etc/passwd",
+            "/models/%2e%2e/etc/passwd",
             "/favicon.ico",
         ]
         for suffix in rejected:
@@ -621,7 +632,7 @@ def test_inconsistent_run_opens_as_error_not_mixed_report(tmp_path: Path) -> Non
     )
     server, thread = _start_server(store)
     try:
-        with _get(viewer_url(server)) as response:
+        with _get(viewer_url(server).rstrip("/") + "/runs") as response:
             index = response.read().decode("utf-8")
         assert meta.run_id not in index
         assert "could not be read" in index
@@ -721,7 +732,7 @@ def test_history_index_offers_compare_for_two_runs(tmp_path: Path) -> None:
     store, first, second, corpus = _two_runs(tmp_path)
     server, thread = _start_server(store)
     try:
-        with _get(viewer_url(server)) as response:
+        with _get(viewer_url(server).rstrip("/") + "/runs") as response:
             html = response.read().decode("utf-8")
         assert 'action="/compare"' in html
         assert "Compare selected runs" in html

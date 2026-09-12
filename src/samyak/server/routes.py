@@ -1,4 +1,4 @@
-"""Request routing for the local run-history viewer."""
+"""Request routing for the local Samyak workspace viewer."""
 
 from __future__ import annotations
 
@@ -8,6 +8,9 @@ from urllib.parse import parse_qs, unquote, urlparse
 from samyak.comparison.compare import compare_runs, earlier_run
 from samyak.comparison.errors import IncompatibleRunsError
 from samyak.corpus.report import render_html_report
+from samyak.model.catalog import ModelCatalog
+from samyak.model.errors import CatalogNotFoundError, CatalogSchemaError, CatalogStoreError
+from samyak.model.store import FileCatalogStore
 from samyak.server.compare_page import render_comparison_page
 from samyak.server.dashboard import (
     HISTORY_PAGE_SIZE,
@@ -17,18 +20,47 @@ from samyak.server.dashboard import (
     render_not_found_page,
     wrap_report_html,
 )
+from samyak.server.model_catalog import (
+    render_catalog_missing_page,
+    render_catalog_unavailable_page,
+    render_model_catalog,
+)
+from samyak.server.model_detail import render_model_detail, render_model_not_found_page
+from samyak.server.workspace import (
+    CATALOG_CORRUPT,
+    CATALOG_MISSING,
+    CATALOG_SCHEMA,
+    render_workspace,
+)
 from samyak.store.errors import RunCorruptError, RunNotFoundError, RunSchemaError
 from samyak.store.filesystem import RunStore
 
 
 class ViewerHandler(BaseHTTPRequestHandler):
-    """HTTP handler bound to a :class:`RunStore` instance."""
+    """HTTP handler bound to a run store and a catalog store."""
 
+    run_store: RunStore
+    catalog_store: FileCatalogStore
     store: RunStore
 
     @classmethod
+    def with_stores(
+        cls,
+        run_store: RunStore,
+        catalog_store: FileCatalogStore | None = None,
+    ) -> type[ViewerHandler]:
+        if catalog_store is None:
+            root = getattr(run_store, "root", None)
+            catalog_store = FileCatalogStore(root=root)
+        return type(
+            "BoundViewerHandler",
+            (cls,),
+            {"run_store": run_store, "store": run_store, "catalog_store": catalog_store},
+        )
+
+    @classmethod
     def with_store(cls, store: RunStore) -> type[ViewerHandler]:
-        return type("BoundViewerHandler", (cls,), {"store": store})
+        return cls.with_stores(store)
 
     def do_GET(self) -> None:
         self._handle()
@@ -46,8 +78,17 @@ class ViewerHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if path == "/":
             query = parse_qs(parsed.query)
+            if "offset" in query:
+                offset = _parse_offset(query.get("offset", ["0"])[0])
+                self._send_redirect(f"/runs?offset={offset}", body=body)
+                return
+            self._send_workspace(body=body)
+            return
+
+        if path == "/runs":
+            query = parse_qs(parsed.query)
             offset = _parse_offset(query.get("offset", ["0"])[0])
-            page = self.store.list_runs(limit=HISTORY_PAGE_SIZE, offset=offset)
+            page = self.run_store.list_runs(limit=HISTORY_PAGE_SIZE, offset=offset)
             html = render_dashboard(page)
             self._send_html(200, html, body=body)
             return
@@ -64,11 +105,81 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self._send_compare(parsed, body=body)
             return
 
+        if path == "/models":
+            self._send_models(parsed, body=body)
+            return
+
+        if path.startswith("/models/"):
+            samyak_id = path.removeprefix("/models/")
+            if not samyak_id:
+                self._send_html(404, render_model_not_found_page(), body=body)
+                return
+            self._send_model(samyak_id, body=body)
+            return
+
         self._send_html(404, render_not_found_page("Page not found."), body=body)
+
+    def _send_workspace(self, *, body: bool) -> None:
+        runs = self.run_store.list_runs(limit=1, offset=0)
+        catalog, state = self._load_catalog()
+        html = render_workspace(runs, catalog, catalog_state=state)
+        self._send_html(200, html, body=body)
+
+    def _send_models(self, parsed, *, body: bool) -> None:
+        catalog, state = self._load_catalog()
+        if state == CATALOG_MISSING:
+            self._send_html(200, render_catalog_missing_page(), body=body)
+            return
+        if state == CATALOG_SCHEMA:
+            self._send_html(
+                409, render_catalog_unavailable_page(unsupported_schema=True), body=body
+            )
+            return
+        if catalog is None:
+            self._send_html(
+                409, render_catalog_unavailable_page(unsupported_schema=False), body=body
+            )
+            return
+        query = parse_qs(parsed.query)
+        q = (query.get("q") or [""])[0]
+        lifecycle = (query.get("lifecycle") or ["all"])[0].strip().lower()
+        html = render_model_catalog(catalog, q=q, lifecycle=lifecycle)
+        self._send_html(200, html, body=body)
+
+    def _send_model(self, samyak_id: str, *, body: bool) -> None:
+        catalog, state = self._load_catalog()
+        if state == CATALOG_MISSING:
+            self._send_html(200, render_catalog_missing_page(), body=body)
+            return
+        if state == CATALOG_SCHEMA:
+            self._send_html(
+                409, render_catalog_unavailable_page(unsupported_schema=True), body=body
+            )
+            return
+        if catalog is None:
+            self._send_html(
+                409, render_catalog_unavailable_page(unsupported_schema=False), body=body
+            )
+            return
+        record = next((item for item in catalog.models if item.samyak_id == samyak_id), None)
+        if record is None:
+            self._send_html(404, render_model_not_found_page(), body=body)
+            return
+        self._send_html(200, render_model_detail(catalog, record), body=body)
+
+    def _load_catalog(self) -> tuple[ModelCatalog | None, str | None]:
+        try:
+            return self.catalog_store.load(), None
+        except CatalogNotFoundError:
+            return None, CATALOG_MISSING
+        except CatalogSchemaError:
+            return None, CATALOG_SCHEMA
+        except CatalogStoreError:
+            return None, CATALOG_CORRUPT
 
     def _send_run(self, run_id: str, *, body: bool) -> None:
         try:
-            stored = self.store.get_run(run_id)
+            stored = self.run_store.get_run(run_id)
         except RunNotFoundError:
             self._send_html(404, render_not_found_page("That run was not found."), body=body)
             return
@@ -112,7 +223,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
         loaded: list = []
         for run_id in (left_id, right_id):
             try:
-                loaded.append(self.store.get_run(run_id))
+                loaded.append(self.run_store.get_run(run_id))
             except RunNotFoundError:
                 self._send_html(404, render_not_found_page("That run was not found."), body=body)
                 return
@@ -141,6 +252,14 @@ class ViewerHandler(BaseHTTPRequestHandler):
             return
 
         self._send_html(200, render_comparison_page(result), body=body)
+
+    def _send_redirect(self, location: str, *, body: bool) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
 
     def _send_html(self, status: int, html: str, *, body: bool) -> None:
         payload = html.encode("utf-8")

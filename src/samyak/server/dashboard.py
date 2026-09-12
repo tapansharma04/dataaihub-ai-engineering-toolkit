@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from html import escape
-
+from samyak.server.layout import escape_html as _e
+from samyak.server.layout import format_timestamp as _format_timestamp
+from samyak.server.layout import render_nav, render_page
 from samyak.store.models import RunMetadata, RunPage
 
 HISTORY_PAGE_SIZE = 50
@@ -44,8 +45,10 @@ def render_dashboard(page: RunPage) -> str:
             )
         else:
             table = f"{hint}{wrap}"
-    return _page(
+    return render_page(
         title="Samyak Run History",
+        current="/runs",
+        extra_css=_CSS,
         body="".join(
             [
                 "<header>",
@@ -80,11 +83,9 @@ def wrap_report_html(report_html: str, metadata: RunMetadata) -> str:
             f"<div><dt>Corpus path</dt><dd><code>{_e(metadata.corpus_path)}</code></dd></div>"
         )
     chrome = (
-        f"<style>{_NAV_CSS}</style>"
-        '<nav class="sv-nav">'
-        '<a href="/">← Run History</a>'
-        '<span class="sv-local">Local workspace</span>'
-        "</nav>"
+        f"<style>{_NAV_INJECT_CSS}</style>"
+        f"{render_nav(current='/runs')}"
+        '<p class="sv-back"><a href="/runs">← Run History</a></p>'
         '<aside class="sv-run-meta">'
         f"<div><dt>Corpus</dt><dd>{_e(corpus)}</dd></div>"
         f"{path_row}"
@@ -100,15 +101,17 @@ def wrap_report_html(report_html: str, metadata: RunMetadata) -> str:
 
 
 def render_not_found_page(message: str) -> str:
-    return _page(
-        title="Run not found — Samyak",
+    return render_page(
+        title="Not found — Samyak",
+        current="/",
+        extra_css=_CSS,
         body="".join(
             [
                 "<header>",
                 '<p class="eyebrow">Samyak</p>',
                 "<h1>Not found</h1>",
                 f"<p>{_e(message)}</p>",
-                '<p><a href="/">← Run History</a></p>',
+                '<p><a href="/">Workspace</a> · <a href="/runs">← Run History</a></p>',
                 "</header>",
             ]
         ),
@@ -116,15 +119,17 @@ def render_not_found_page(message: str) -> str:
 
 
 def render_bad_request_page(message: str) -> str:
-    return _page(
+    return render_page(
         title="Cannot compare — Samyak",
+        current="/runs",
+        extra_css=_CSS,
         body="".join(
             [
                 "<header>",
                 '<p class="eyebrow">Samyak</p>',
                 "<h1>Cannot compare</h1>",
                 f"<p>{_e(message)}</p>",
-                '<p><a href="/">← Run History</a></p>',
+                '<p><a href="/runs">← Run History</a></p>',
                 "</header>",
             ]
         ),
@@ -132,8 +137,10 @@ def render_bad_request_page(message: str) -> str:
 
 
 def render_corrupt_run_page(run_id: str, message: str) -> str:
-    return _page(
+    return render_page(
         title="Saved run unavailable — Samyak",
+        current="/runs",
+        extra_css=_CSS,
         body="".join(
             [
                 "<header>",
@@ -141,7 +148,7 @@ def render_corrupt_run_page(run_id: str, message: str) -> str:
                 "<h1>Saved run unavailable</h1>",
                 f"<p>{_e(message)}</p>",
                 f'<p class="muted">Run ID: <code>{_e(run_id)}</code></p>',
-                '<p><a href="/">← Run History</a></p>',
+                '<p><a href="/runs">← Run History</a></p>',
                 "</header>",
             ]
         ),
@@ -206,10 +213,10 @@ def _pagination(page: RunPage) -> str:
     links: list[str] = []
     if page.offset > 0:
         prev_offset = max(page.offset - page.limit, 0)
-        links.append(f'<a href="/?offset={prev_offset}">Newer runs</a>')
+        links.append(f'<a href="/runs?offset={prev_offset}">Newer runs</a>')
     if page.offset + page.limit < page.total:
         next_offset = page.offset + page.limit
-        links.append(f'<a href="/?offset={next_offset}">Older runs</a>')
+        links.append(f'<a href="/runs?offset={next_offset}">Older runs</a>')
     if not links:
         return ""
     return f'<nav class="pager">{"".join(links)}</nav>'
@@ -221,26 +228,6 @@ def _showing_label(page: RunPage) -> str:
     start = page.offset + 1
     end = min(page.offset + len(page.runs), page.total)
     return f"Showing {start}–{end} of {page.total} saved runs"
-
-
-def _page(*, title: str, body: str) -> str:
-    return "\n".join(
-        [
-            "<!DOCTYPE html>",
-            '<html lang="en">',
-            "<head>",
-            '<meta charset="utf-8">',
-            '<meta name="viewport" content="width=device-width, initial-scale=1">',
-            f"<title>{_e(title)}</title>",
-            f"<style>{_CSS}</style>",
-            "</head>",
-            "<body>",
-            body,
-            "</body>",
-            "</html>",
-            "",
-        ]
-    )
 
 
 def _format_duration(seconds: float) -> str:
@@ -255,39 +242,7 @@ def _format_duration(seconds: float) -> str:
     return f"{int(hours)}h {int(minutes)}m"
 
 
-def _format_timestamp(value: str) -> str:
-    if value.endswith("+00:00"):
-        return value.removesuffix("+00:00") + " UTC"
-    if value.endswith("Z"):
-        return value.removesuffix("Z") + " UTC"
-    return value
-
-
-def _e(value: object) -> str:
-    return escape(str(value), quote=True)
-
-
 _CSS = (
-    ":root{color-scheme:light}"
-    "*{box-sizing:border-box}"
-    "html{max-width:100%;overflow-x:hidden}"
-    "body{margin:0 auto;max-width:72rem;width:100%;padding:2rem 1.25rem 3rem;"
-    "font:16px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif;"
-    "color:#1a1a1a;background:#f6f4f0}"
-    "header,section,footer{margin-bottom:2rem}"
-    ".eyebrow{margin:0;letter-spacing:.08em;text-transform:uppercase;"
-    "font-size:.75rem;color:#5c574f}"
-    "h1{margin:.35rem 0 .75rem;font-size:1.85rem}"
-    "h2{margin:0 0 .75rem;font-size:1.2rem;border-bottom:1px solid #d9d3c8;"
-    "padding-bottom:.35rem}"
-    ".lede,footer p,.muted,.empty{color:#5c574f}"
-    ".muted{font-size:.92rem}"
-    ".empty{background:#fff;border:1px solid #e4ddd2;padding:1rem 1.1rem}"
-    "code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;"
-    "font-size:.85em;word-break:break-all}"
-    "a{color:#1d3f6e}"
-    ".table-wrap{width:100%;max-width:100%;overflow-x:auto;"
-    "-webkit-overflow-scrolling:touch;border:1px solid #e4ddd2;background:#fff}"
     "table.runs{min-width:56rem;width:100%;border-collapse:collapse;"
     "font-size:.92rem}"
     "table.runs th,table.runs td{text-align:left;padding:.55rem .7rem;"
@@ -302,17 +257,19 @@ _CSS = (
     "color:#fff;border:0;cursor:pointer}"
     "nav.pager{display:flex;gap:1rem;margin-top:1rem;flex-wrap:wrap}"
     ".scroll-hint{display:none;margin:.35rem 0 .6rem}"
-    "@media (max-width:40rem){body{padding:1.25rem .85rem 2rem}"
-    ".scroll-hint{display:block}}"
-    "footer{font-size:.9rem}"
+    "@media (max-width:40rem){.scroll-hint{display:block}}"
 )
 
-_NAV_CSS = (
+_NAV_INJECT_CSS = (
     ".sv-nav{display:flex;flex-wrap:wrap;gap:.75rem 1.25rem;align-items:center;"
-    "margin:0 0 1rem;padding:.75rem 0;border-bottom:1px solid #d9d3c8;"
+    "margin:0 0 1.25rem;padding:.75rem 0;border-bottom:1px solid #d9d3c8;"
     "font:14px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif}"
     ".sv-nav a{color:#1d3f6e;text-decoration:none}"
-    ".sv-local{color:#5c574f}"
+    ".sv-nav a.sv-brand{font-weight:650;color:#1a1a1a}"
+    ".sv-nav a.sv-current{font-weight:650}"
+    ".sv-local{color:#5c574f;margin-left:auto}"
+    ".sv-back{margin:0 0 1rem;font:14px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif}"
+    ".sv-back a{color:#1d3f6e}"
     ".sv-run-meta{display:grid;gap:.35rem 1rem;margin:0 0 1.5rem;"
     "font:14px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif}"
     ".sv-run-meta>div{display:grid;grid-template-columns:minmax(7rem,28%) 1fr;"

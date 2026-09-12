@@ -4,7 +4,7 @@ AI engineering tooling for building reliable AI applications.
 
 **Samyak is an open-source project by [DataAIHub](https://www.dataaihub.co).**
 
-The current release provides **Corpus Intelligence** for analyzing document collections before they are used in AI and RAG systems.
+The current release provides **Corpus Intelligence** for analyzing document collections before they are used in AI and RAG systems, and **Model Intelligence** for a local catalog of documented OpenAI and Anthropic API models.
 
 ## Corpus Intelligence
 
@@ -14,13 +14,30 @@ Many AI/RAG issues start in the source corpus — empty files, duplicates, tiny 
 
 Corpus Intelligence inspects a local document directory, collects evidence, explains why findings matter, and recommends practical next actions. It identifies characteristics that **may** affect downstream systems. It does **not** guarantee or predict retrieval or answer quality.
 
+## Model Intelligence
+
+Keep a local catalog of provider-documented API models, verified from official documentation rather than guessed from marketing pages or live API probes.
+
+v0.2.0 covers **OpenAI** and **Anthropic** (Claude API). Refresh one provider at a time; the other provider's records stay in the overlay.
+
+```bash
+samyak model update openai
+samyak model update anthropic
+samyak view
+```
+
+`samyak model update` is Samyak's **only network command**. It fetches official documentation over HTTPS and writes `models/catalog.json` under the local Samyak cache. No API key, account, or provider SDK is required. Browse the catalog in `samyak view` afterward; the viewer itself stays on loopback and does not refresh the catalog.
+
+There is no `samyak model list` or `samyak model show`. Model Intelligence is not a pricing, ranking, or recommendation product.
+
 ## Who it is for
 
 - AI / ML engineers preparing document corpora for RAG or other retrieval workflows
+- Engineers choosing among documented OpenAI and Anthropic API models
 - Data engineers validating knowledge-base handoffs
 - Platform and QA teams adding corpus checks to local workflows or CI
 
-## Features (v0.1.1)
+## Features (v0.2.0)
 
 - Corpus inventory (supported / unsupported / analyzed, by format)
 - Empty and whitespace-only document detection
@@ -36,19 +53,23 @@ Corpus Intelligence inspects a local document directory, collects evidence, expl
 - Human-readable CLI report, JSON output, and self-contained HTML reports
 - Incremental corpus processing (documents are not all held in memory at once)
 - Progress on stderr for large corpora (`--no-progress` to disable)
-- Fully local analysis — no network, no API keys, no telemetry
+- Corpus analysis is fully local — no network, no API keys, no telemetry
 - Optional local run history (`--save`) and loopback viewer (`samyak view`)
 - Baseline → current comparison of two saved runs
+- Local model catalog from official OpenAI and Anthropic documentation
+- `samyak model update openai` and `samyak model update anthropic` (the only network commands; no API key)
+- Offline model-catalog browsing in `samyak view` after a refresh
 
 ## Privacy / local processing
 
 Samyak:
 
 - processes documents on your machine
-- makes **no** network or API calls
 - sends **no** document content externally
 - includes **no** telemetry
 - requires **no** account and **no** API key
+- runs Corpus Intelligence and `samyak view` with **no** network or API calls
+- uses the network **only** for `samyak model update`, which fetches official provider documentation and writes a local catalog overlay
 
 Treat corpus files as untrusted input: contents are never executed or interpreted as instructions.
 
@@ -65,7 +86,7 @@ samyak corpus ./documents --save
 samyak view
 ```
 
-`samyak view` starts a local HTTP server on **127.0.0.1** (default port **15500**) and prints a URL such as `http://127.0.0.1:15500/`. The dashboard lists recent saved runs (corpus **basename**, timestamp, run ID, counts, and status). Opening a run shows that run’s metadata — corpus name and the local **corpus path** as separate fields — plus the existing Samyak HTML report, reconstructed from stored JSON. You do not need the original corpus files to still exist, and you do not need to rerun analysis.
+`samyak view` starts a local HTTP server on **127.0.0.1** (default port **15500**) and prints a URL such as `http://127.0.0.1:15500/`. The home page is a local workspace: saved corpus runs and, after a model refresh, the Model Intelligence catalog. The dashboard lists recent saved runs (corpus **basename**, timestamp, run ID, counts, and status). Opening a run shows that run’s metadata — corpus name and the local **corpus path** as separate fields — plus the existing Samyak HTML report, reconstructed from stored JSON. You do not need the original corpus files to still exist, and you do not need to rerun analysis.
 
 To compare two runs, select exactly two rows on the history page and choose **Compare selected runs**. The earlier saved run is the **baseline**; the later run is **current**. Deltas are baseline → current. The comparison page summarizes inventory changes (files discovered/supported/unsupported/analyzed, finding counts, load/discovery errors) and groups findings as new, no longer detected, changed, or unchanged. A finding that is no longer detected was present in the baseline snapshot and absent from the current snapshot; that is not proof the underlying issue was fixed.
 
@@ -89,7 +110,9 @@ Each run is stored as `runs/<run-id>/report.json` and `runs/<run-id>/metadata.js
 - `report.json` is the existing `AnalysisReport` JSON (document paths stay **corpus-relative**).
 - `metadata.json` is local run-history metadata: timestamps, counts, a corpus **basename**, and the **local corpus directory path** from when `--save` was used. That path is machine-local metadata for distinguishing folders with the same name. It is not included in stdout, `--format json`, `--format html`, or `--output` files.
 
-The viewer binds to loopback only and makes no network requests outside this machine. Nothing is uploaded.
+The model catalog overlay is `models/catalog.json` in the same cache directory. `catalog.json.bak` is a best-effort previous copy and is not the live catalog.
+
+The viewer binds to loopback only and makes no network requests outside this machine. Nothing is uploaded. Refreshing the model catalog requires `samyak model update`, not the viewer.
 
 ## Supported formats (v0.1)
 
@@ -145,6 +168,14 @@ Save a run for the local viewer:
 samyak corpus ./documents --save
 ```
 
+Refresh the local model catalog (uses the network; no API key):
+
+```bash
+samyak model update openai
+samyak model update anthropic
+samyak view
+```
+
 Write a JSON report file:
 
 ```bash
@@ -157,6 +188,8 @@ Help and version:
 samyak --help
 samyak corpus --help
 samyak view --help
+samyak model --help
+samyak model update --help
 samyak --version
 ```
 
@@ -194,7 +227,7 @@ Samyak Corpus Intelligence Report
 
 Product:                  samyak
 Capability:               corpus
-Version:                  0.1.1
+Version:                  0.2.0
 
 Corpus
 ------
@@ -238,7 +271,7 @@ Example identity fields:
 {
   "product": "samyak",
   "capability": "corpus",
-  "version": "0.1.1"
+  "version": "0.2.0"
 }
 ```
 
@@ -256,8 +289,8 @@ Omit `--output` to print HTML to stdout (same contract as text and JSON).
 
 Exit codes (v0.1):
 
-- `0` — analysis completed (findings do not change the exit code)
-- `2` — invalid path, invalid configuration, missing subcommand, or I/O failure writing `--output`
+- `0` — analysis completed (findings do not change the exit code); model catalog update committed
+- `2` — invalid path, invalid configuration, missing subcommand, I/O failure writing `--output`, unknown model provider, or model catalog update failed
 
 Findings (including `HIGH`) do **not** fail the process by themselves. v0.1 reports findings but does not fail CI based on finding severity.
 
@@ -318,6 +351,9 @@ Controlled detection validation covers empty documents, exact duplicates, size o
 - Finding path lists in reports are bounded samples; full counts remain in evidence
 - Multi-gigabyte *corpora* are processed incrementally and do not require holding all document text in RAM
 - Local run history is opt-in (`--save`); there is no automatic cleanup yet
+- Model Intelligence currently covers official OpenAI and Anthropic Claude API documentation only — not partner platforms, other providers, pricing, or recommendations
+- Model facts are taken from captured documentation, not from probing provider APIs
+- A provider refresh replaces that provider's records; it does not invent missing detail-page facts when a model page cannot be retrieved
 
 ## Samyak by DataAIHub
 
@@ -325,7 +361,7 @@ Controlled detection validation covers empty documents, exact duplicates, size o
 | --- | --- |
 | [DataAIHub](https://www.dataaihub.co) | Knowledge, ecosystem, research, guides, comparisons, and discovery |
 | [DataAIHub Cookbook](https://github.com/tapansharma04/dataaihub-cookbook) | Practical, runnable examples for learning AI engineering patterns |
-| **[Samyak](https://github.com/tapansharma04/dataaihub-ai-engineering-toolkit)** (this repository) | Open-source AI engineering product; current capability: Corpus Intelligence |
+| **[Samyak](https://github.com/tapansharma04/dataaihub-ai-engineering-toolkit)** (this repository) | Open-source AI engineering product; current capabilities: Corpus Intelligence and Model Intelligence |
 
 ## Development
 
