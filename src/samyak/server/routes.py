@@ -143,7 +143,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         q = (query.get("q") or [""])[0]
         lifecycle = (query.get("lifecycle") or ["all"])[0].strip().lower()
-        html = render_model_catalog(catalog, q=q, lifecycle=lifecycle)
+        provider = (query.get("provider") or ["all"])[0].strip().lower()
+        html = render_model_catalog(catalog, q=q, lifecycle=lifecycle, provider=provider)
         self._send_html(200, html, body=body)
 
     def _send_model(self, samyak_id: str, *, body: bool) -> None:

@@ -4,7 +4,7 @@ AI engineering tooling for building reliable AI applications.
 
 **Samyak is an open-source project by [DataAIHub](https://www.dataaihub.co).**
 
-The current release provides **Corpus Intelligence** for analyzing document collections before they are used in AI and RAG systems, and **Model Intelligence** for a local catalog of documented OpenAI and Anthropic API models.
+The current release provides **Corpus Intelligence** for analyzing document collections before they are used in AI and RAG systems, and **Model Intelligence** for a local catalog of documented API models from official provider documentation.
 
 ## Corpus Intelligence
 
@@ -18,11 +18,11 @@ Corpus Intelligence inspects a local document directory, collects evidence, expl
 
 Keep a local catalog of provider-documented API models, verified from official documentation rather than guessed from marketing pages or live API probes.
 
-v0.2.0 covers **OpenAI** and **Anthropic** (Claude API). Refresh one provider at a time; the other provider's records stay in the overlay.
+v0.3.0 covers these serving sources: **anthropic**, **fireworks**, **google**, **openai**, and **together**. Refresh one provider, or refresh all of them sequentially with `samyak model update all`. Other providers' records stay in the overlay.
 
 ```bash
 samyak model update openai
-samyak model update anthropic
+samyak model update all
 samyak view
 ```
 
@@ -33,11 +33,11 @@ There is no `samyak model list` or `samyak model show`. Model Intelligence is no
 ## Who it is for
 
 - AI / ML engineers preparing document corpora for RAG or other retrieval workflows
-- Engineers choosing among documented OpenAI and Anthropic API models
+- Engineers choosing among documented API models from Anthropic, Fireworks, Google, OpenAI, or Together
 - Data engineers validating knowledge-base handoffs
 - Platform and QA teams adding corpus checks to local workflows or CI
 
-## Features (v0.2.0)
+## Features (v0.3.0)
 
 - Corpus inventory (supported / unsupported / analyzed, by format)
 - Empty and whitespace-only document detection
@@ -56,9 +56,10 @@ There is no `samyak model list` or `samyak model show`. Model Intelligence is no
 - Corpus analysis is fully local — no network, no API keys, no telemetry
 - Optional local run history (`--save`) and loopback viewer (`samyak view`)
 - Baseline → current comparison of two saved runs
-- Local model catalog from official OpenAI and Anthropic documentation
-- `samyak model update openai` and `samyak model update anthropic` (the only network commands; no API key)
+- Local model catalog from official Anthropic, Fireworks, Google, OpenAI, and Together documentation
+- `samyak model update` for one serving source, or `samyak model update all` (the only network commands; no API key)
 - Offline model-catalog browsing in `samyak view` after a refresh
+- `samyak model history` to inspect previously observed documented lifecycle changes (local; no network)
 
 ## Privacy / local processing
 
@@ -172,7 +173,7 @@ Refresh the local model catalog (uses the network; no API key):
 
 ```bash
 samyak model update openai
-samyak model update anthropic
+samyak model update all
 samyak view
 ```
 
@@ -190,6 +191,7 @@ samyak corpus --help
 samyak view --help
 samyak model --help
 samyak model update --help
+samyak model history --help
 samyak --version
 ```
 
@@ -227,7 +229,7 @@ Samyak Corpus Intelligence Report
 
 Product:                  samyak
 Capability:               corpus
-Version:                  0.2.0
+Version:                  0.3.0
 
 Corpus
 ------
@@ -271,7 +273,7 @@ Example identity fields:
 {
   "product": "samyak",
   "capability": "corpus",
-  "version": "0.2.0"
+  "version": "0.3.0"
 }
 ```
 
@@ -351,7 +353,7 @@ Controlled detection validation covers empty documents, exact duplicates, size o
 - Finding path lists in reports are bounded samples; full counts remain in evidence
 - Multi-gigabyte *corpora* are processed incrementally and do not require holding all document text in RAM
 - Local run history is opt-in (`--save`); there is no automatic cleanup yet
-- Model Intelligence currently covers official OpenAI and Anthropic Claude API documentation only — not partner platforms, other providers, pricing, or recommendations
+- Model Intelligence currently covers official Anthropic, Fireworks, Google (Gemini API), OpenAI, and Together documentation — not partner platforms, other serving sources, pricing, or recommendations
 - Model facts are taken from captured documentation, not from probing provider APIs
 - A provider refresh replaces that provider's records; it does not invent missing detail-page facts when a model page cannot be retrieved
 

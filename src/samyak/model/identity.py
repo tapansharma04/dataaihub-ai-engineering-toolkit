@@ -4,8 +4,11 @@ Identity is ``(provider_id, provider_model_id)``. ``samyak_id`` is derived and
 stable. Aliases are separate records; they do not replace canonical identity.
 
 Provider ids are validated slugs, not free-form HTML text. Adapters currently
-exist for ``openai`` and ``anthropic``; identity remains an open slug so a
-closed provider enum is not required.
+exist for ``openai``, ``anthropic``, ``google`` (Gemini API), ``fireworks``,
+and ``together``.
+Identity remains an open slug so a closed provider enum is not required.
+``provider_id`` is the serving source whose documentation establishes the
+offering, not the model creator.
 """
 
 from __future__ import annotations

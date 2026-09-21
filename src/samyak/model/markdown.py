@@ -9,6 +9,13 @@ _HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)\s*$")
 _LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _CODE = re.compile(r"`([^`]+)`")
 _BULLET = re.compile(r"^[-*][ \t]+(.+)$")
+_TRAILING_FOOTNOTE = re.compile(
+    r"(?:"
+    r"\s*\^[^^]+\^"
+    r"|"
+    r"\s*\^\{?\[[^\]]+\]\}?"
+    r")+$"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +27,15 @@ class MarkdownSection:
 
 def normalize_heading(title: str) -> str:
     return " ".join(title.strip().lower().split())
+
+
+def strip_trailing_markdown_footnote(text: str) -> str:
+    """Remove a trailing Markdown footnote marker from a label.
+
+    Handles caret-wrapped footnotes used in official docs, including
+    ``^{[*]}`` and ``^[...](url)^``. Interior text is left unchanged.
+    """
+    return _TRAILING_FOOTNOTE.sub("", text).rstrip()
 
 
 def split_sections(markdown: str) -> tuple[MarkdownSection, ...]:

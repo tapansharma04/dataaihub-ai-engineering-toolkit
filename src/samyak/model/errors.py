@@ -32,3 +32,15 @@ class CatalogSchemaError(ModelCatalogError):
     def __init__(self, schema_version: object) -> None:
         self.schema_version = schema_version
         super().__init__(f"unsupported catalog_schema_version {schema_version!r}")
+
+
+class HistoryStoreError(ModelCatalogError):
+    """The local lifecycle history file could not be read or written."""
+
+
+class HistorySchemaError(ModelCatalogError):
+    """The stored lifecycle history schema version is not supported."""
+
+    def __init__(self, schema_version: object) -> None:
+        self.schema_version = schema_version
+        super().__init__(f"unsupported lifecycle_history_schema_version {schema_version!r}")

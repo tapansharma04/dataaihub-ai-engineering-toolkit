@@ -8,8 +8,9 @@ Layout (under the Samyak cache directory)::
     $SAMYAK_CACHE_DIR/
       runs/                 # corpus run history; never written here
       models/
-        catalog.json        # live overlay; the only atomic correctness boundary
-        catalog.json.bak    # best-effort previous overlay; not part of the commit invariant
+        catalog.json              # live overlay; current-state correctness boundary
+        catalog.json.bak          # best-effort previous overlay; not part of the commit invariant
+        lifecycle-history.json    # documented lifecycle-change log; not current state
 
 ``catalog.json`` is replaced atomically (temp file, fsync, ``os.replace``).
 ``catalog.json.bak`` is updated only after a successful live replace, and a
