@@ -25,7 +25,13 @@ from samyak.server.model_catalog import (
     render_freshness_block,
 )
 
-_PROVIDER_LABEL = {"openai": "OpenAI", "anthropic": "Anthropic"}
+_PROVIDER_LABEL = {
+    "openai": "OpenAI",
+    "anthropic": "Anthropic",
+    "google": "Google",
+    "fireworks": "Fireworks",
+    "together": "Together",
+}
 _FACT_STATUS_LABEL = {
     FactStatus.UNKNOWN: "Unknown",
     FactStatus.NOT_VERIFIED: "Not verified",
@@ -99,7 +105,7 @@ def render_model_detail(catalog: ModelCatalog, record: ModelRecord) -> str:
             "<h2>Identity</h2>",
             _dl(
                 [
-                    ("Provider", _e(_provider_label(record.provider_id))),
+                    ("Serving source", _e(_provider_label(record.provider_id))),
                     ("Provider model ID", f"<code>{_e(record.provider_model_id)}</code>"),
                     ("Kind", _e(record.identity_kind.value)),
                     ("Display name", _render_fact(record.display_name)),
@@ -197,6 +203,10 @@ def _render_fact(fact: Fact, *, format_known=None) -> str:
     if fact.status is FactStatus.CONFLICT:
         return _conflict_html(fact, format_known=format_known)
     label = _FACT_STATUS_LABEL.get(fact.status, fact.status.value)
+    if fact.status is FactStatus.UNKNOWN:
+        return f'<span class="fact-unknown">{_e(label)}</span>'
+    if fact.status is FactStatus.NOT_VERIFIED:
+        return f'<span class="fact-not-verified">{_e(label)}</span>'
     return f'<span class="muted">{_e(label)}</span>'
 
 
@@ -210,7 +220,8 @@ def _conflict_html(fact: Fact, *, format_known=None) -> str:
         for claim in fact.claims
     )
     return (
-        '<p class="banner warn">Conflict: Samyak did not resolve competing evidence.</p>'
+        '<p class="banner warn fact-conflict">'
+        "Conflict: Samyak did not resolve competing evidence.</p>"
         f"<ul class='claims'>{claims}</ul>"
     )
 
@@ -384,4 +395,8 @@ _CSS = (
     ".life-retired{background:#e3e3e3;color:#333}"
     ".banner{background:#fff;border:1px solid #e4ddd2;padding:.85rem 1rem}"
     ".banner.warn{border-color:#d9b08c;background:#fbf4ea}"
+    ".fact-unknown{color:#8a857c;font-style:italic}"
+    ".fact-not-verified{color:#5c574f;font-weight:600;"
+    "border-bottom:1px dotted #8a857c}"
+    ".fact-conflict{color:#6d4a00;background:#fbf4ea;padding:.05rem .3rem}"
 )

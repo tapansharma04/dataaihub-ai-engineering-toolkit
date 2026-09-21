@@ -34,8 +34,11 @@ def render_workspace(
             _model_section(catalog, catalog_state),
             "<footer>",
             "<p>This viewer reads local Samyak cache data. Nothing is sent over the network. "
-            f"Refresh Model Intelligence with <code>{_e(UPDATE_COMMAND)}</code> or "
-            "<code>samyak model update anthropic</code>.</p>",
+            f"Refresh Model Intelligence with <code>{_e(UPDATE_COMMAND)}</code>, "
+            "<code>samyak model update anthropic</code>, "
+            "<code>samyak model update google</code>, "
+            "<code>samyak model update fireworks</code>, or "
+            "<code>samyak model update together</code>.</p>",
             "</footer>",
         ]
     )
@@ -79,7 +82,7 @@ def _model_section(catalog: ModelCatalog | None, catalog_state: str | None) -> s
             "<section>"
             "<h2>Model Intelligence</h2>"
             "<h3>Model Catalog</h3>"
-            "<p>Provider model information verified from captured documentation.</p>"
+            "<p>Serving-source model information verified from captured documentation.</p>"
             '<p class="empty">No local model catalog yet. Model Intelligence becomes '
             "available after "
             f"<code>{_e(UPDATE_COMMAND)}</code>. Then refresh this page.</p>"
@@ -128,7 +131,7 @@ def _model_section(catalog: ModelCatalog | None, catalog_state: str | None) -> s
         "<section>"
         "<h2>Model Intelligence</h2>"
         "<h3>Model Catalog</h3>"
-        "<p>Provider model information verified from captured documentation.</p>"
+        "<p>Serving-source model information verified from captured documentation.</p>"
         f'<p class="muted">{_e(summary)}</p>'
         f'<p class="muted">As of {_e(as_of)}</p>'
         f"{partial}"

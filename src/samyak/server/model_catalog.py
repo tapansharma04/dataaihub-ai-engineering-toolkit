@@ -12,7 +12,7 @@ from samyak.model.catalog import (
     FreshnessStatus,
     ModelCatalog,
 )
-from samyak.model.facts import ContextWindow, FactStatus, LifecycleState
+from samyak.model.facts import ContextWindow, Fact, FactStatus, LifecycleState
 from samyak.model.records import ModelRecord
 from samyak.server.layout import escape_html as _e
 from samyak.server.layout import format_as_of_date, render_page
@@ -31,12 +31,19 @@ _OVERLAY_LABEL = {
     CatalogOverlay.BUNDLED: "bundled",
 }
 _LIFECYCLE_FILTER_LABEL = {
-    "all": "All",
+    "all": "All lifecycle states",
     "active": "Active",
     "legacy": "Legacy",
     "deprecated": "Deprecated",
     "retired": "Retired",
     "uncertain": "Uncertain",
+}
+_PROVIDER_FILTER_LABEL = {
+    "anthropic": "Anthropic",
+    "fireworks": "Fireworks",
+    "google": "Google",
+    "openai": "OpenAI",
+    "together": "Together",
 }
 
 
@@ -79,14 +86,33 @@ def search_matches(record: ModelRecord, query: str) -> bool:
     return any(needle in item.lower() for item in haystacks)
 
 
+def provider_matches(record: ModelRecord, provider: str) -> bool:
+    if provider == "all":
+        return True
+    return record.provider_id == provider
+
+
 def filter_models(
-    models: Sequence[ModelRecord], *, q: str = "", lifecycle: str = "all"
+    models: Sequence[ModelRecord],
+    *,
+    q: str = "",
+    lifecycle: str = "all",
+    provider: str = "all",
+    provider_ids: Sequence[str] | None = None,
 ) -> tuple[ModelRecord, ...]:
-    chosen = lifecycle if lifecycle in LIFECYCLE_FILTERS else "all"
+    chosen_lifecycle = lifecycle if lifecycle in LIFECYCLE_FILTERS else "all"
+    known_providers = (
+        provider_ids
+        if provider_ids is not None
+        else tuple(dict.fromkeys(record.provider_id for record in models))
+    )
+    chosen_provider = _normalize_provider_filter(provider, known_providers)
     return tuple(
         record
         for record in models
-        if lifecycle_matches(record, chosen) and search_matches(record, q)
+        if lifecycle_matches(record, chosen_lifecycle)
+        and provider_matches(record, chosen_provider)
+        and search_matches(record, q)
     )
 
 
@@ -136,13 +162,27 @@ def render_notices(notices: Sequence[CatalogNotice]) -> str:
     items = "".join(
         f"<li><code>{_e(notice.code)}</code> {_e(notice.message)}</li>" for notice in notices
     )
-    banner = ""
+    notice_list = f'<ul class="notices">{items}</ul>'
+    refresh = _refresh_html()
     if catalog_is_partial(notices):
-        banner = (
+        explanation = (
             '<p class="banner warn">This catalog is incomplete. Some model pages '
             "could not be retrieved, and facts from those pages are omitted.</p>"
         )
-    return f"{banner}<ul class='notices'>{items}</ul>"
+        return (
+            '<details class="catalog-health">'
+            "<summary>Catalog is partial "
+            '<span class="muted">Some provider documentation could not be retrieved.</span>'
+            "</summary>"
+            f"{explanation}{notice_list}{refresh}"
+            "</details>"
+        )
+    return (
+        '<details class="catalog-health">'
+        "<summary>Catalog notices</summary>"
+        f"{notice_list}{refresh}"
+        "</details>"
+    )
 
 
 def render_catalog_missing_page() -> str:
@@ -186,27 +226,45 @@ def render_catalog_unavailable_page(*, unsupported_schema: bool) -> str:
     )
 
 
-def render_model_catalog(catalog: ModelCatalog, *, q: str = "", lifecycle: str = "all") -> str:
-    chosen = lifecycle if lifecycle in LIFECYCLE_FILTERS else "all"
-    filtered = filter_models(catalog.models, q=q, lifecycle=chosen)
+def render_model_catalog(
+    catalog: ModelCatalog,
+    *,
+    q: str = "",
+    lifecycle: str = "all",
+    provider: str = "all",
+) -> str:
+    chosen_lifecycle = lifecycle if lifecycle in LIFECYCLE_FILTERS else "all"
+    provider_ids = tuple(item.id for item in catalog.providers)
+    chosen_provider = _normalize_provider_filter(provider, provider_ids)
+    filtered = filter_models(
+        catalog.models,
+        q=q,
+        lifecycle=chosen_lifecycle,
+        provider=chosen_provider,
+        provider_ids=provider_ids,
+    )
     body = "".join(
         [
             "<header>",
             '<p class="eyebrow">Samyak</p>',
             "<h1>Model Catalog</h1>",
-            '<p class="lede">Provider model information verified from captured documentation.</p>',
+            '<p class="lede">Serving-source model information verified from captured '
+            "documentation.</p>",
             "</header>",
             "<section>",
             "<h2>Catalog</h2>",
             render_freshness_block(catalog.freshness),
             _provider_line(catalog),
-            render_notices(catalog.notices),
-            f'<p class="muted">Refresh with <code>{_e(UPDATE_COMMAND)}</code> or '
-            "<code>samyak model update anthropic</code>.</p>",
+            render_notices(catalog.notices) or _refresh_html(),
             "</section>",
             "<section>",
             "<h2>Models</h2>",
-            _filter_form(q=q, lifecycle=chosen),
+            _filter_form(
+                q=q,
+                lifecycle=chosen_lifecycle,
+                provider=chosen_provider,
+                provider_ids=provider_ids,
+            ),
             _catalog_table(catalog, filtered),
             "</section>",
         ]
@@ -225,7 +283,8 @@ def _missing_body() -> str:
             "<header>",
             '<p class="eyebrow">Samyak</p>',
             "<h1>Model Catalog</h1>",
-            '<p class="lede">Provider model information verified from captured documentation.</p>',
+            '<p class="lede">Serving-source model information verified from captured '
+            "documentation.</p>",
             "</header>",
             '<p class="empty">No local model catalog yet. Model Intelligence becomes '
             "available after "
@@ -239,22 +298,61 @@ def _provider_line(catalog: ModelCatalog) -> str:
     if not catalog.providers:
         return ""
     parts = [f"{_e(item.id)}: {_e(item.model_count)}" for item in catalog.providers]
-    return f'<p class="muted">Providers: {", ".join(parts)}</p>'
+    return f'<p class="muted">Serving sources: {", ".join(parts)}</p>'
 
 
-def _filter_form(*, q: str, lifecycle: str) -> str:
-    options = []
+def _refresh_html() -> str:
+    return (
+        f'<p class="muted">Refresh with <code>{_e(UPDATE_COMMAND)}</code>, '
+        "<code>samyak model update anthropic</code>, "
+        "<code>samyak model update google</code>, "
+        "<code>samyak model update fireworks</code>, or "
+        "<code>samyak model update together</code>.</p>"
+    )
+
+
+def _normalize_provider_filter(provider: str, provider_ids: Sequence[str]) -> str:
+    chosen = provider.strip().lower()
+    if chosen == "all" or chosen in provider_ids:
+        return chosen or "all"
+    return "all"
+
+
+def _provider_filter_label(provider_id: str) -> str:
+    return _PROVIDER_FILTER_LABEL.get(provider_id, provider_id)
+
+
+def _filter_form(
+    *,
+    q: str,
+    lifecycle: str,
+    provider: str,
+    provider_ids: Sequence[str],
+) -> str:
+    lifecycle_options = []
     for value in ("all", "active", "legacy", "deprecated", "retired", "uncertain"):
         selected = " selected" if value == lifecycle else ""
-        options.append(
+        lifecycle_options.append(
             f'<option value="{_e(value)}"{selected}>{_e(_LIFECYCLE_FILTER_LABEL[value])}</option>'
+        )
+    provider_options = [
+        f'<option value="all"{" selected" if provider == "all" else ""}>All providers</option>'
+    ]
+    for provider_id in provider_ids:
+        selected = " selected" if provider_id == provider else ""
+        provider_options.append(
+            f'<option value="{_e(provider_id)}"{selected}>'
+            f"{_e(_provider_filter_label(provider_id))}</option>"
         )
     return (
         '<form class="filters" method="get" action="/models">'
         '<label>Search <input type="search" name="q" '
         f'value="{_e(q)}" aria-label="Search models"></label>'
+        "<label>Provider "
+        f'<select name="provider" aria-label="Provider">{"".join(provider_options)}</select>'
+        "</label>"
         "<label>Lifecycle "
-        f'<select name="lifecycle" aria-label="Lifecycle">{"".join(options)}</select>'
+        f'<select name="lifecycle" aria-label="Lifecycle">{"".join(lifecycle_options)}</select>'
         "</label>"
         '<button type="submit">Apply</button>'
         "</form>"
@@ -265,14 +363,15 @@ def _catalog_table(catalog: ModelCatalog, models: Sequence[ModelRecord]) -> str:
     if not catalog.models:
         return '<p class="empty">This catalog contains no models.</p>'
     if not models:
-        return '<p class="empty">No models match this search.</p>'
+        return '<p class="empty">No models match these filters.</p>'
     rows = "".join(_model_row(record) for record in models)
     hint = '<p class="scroll-hint muted">On a narrow screen, scroll the table sideways.</p>'
     return (
         f"{hint}"
         '<div class="table-wrap">'
         '<table class="models">'
-        "<thead><tr><th>Model</th><th>Lifecycle</th><th>Context</th></tr></thead>"
+        "<thead><tr><th>Model</th><th>Lifecycle</th><th>Context</th>"
+        "<th>Max input</th><th>Max output</th></tr></thead>"
         f"<tbody>{rows}</tbody>"
         "</table>"
         "</div>"
@@ -290,6 +389,8 @@ def _model_row(record: ModelRecord) -> str:
         "</td>"
         f"<td>{lifecycle_html(record)}</td>"
         f"<td>{context_html(record)}</td>"
+        f"<td>{token_limit_html(record.max_input_tokens)}</td>"
+        f"<td>{token_limit_html(record.max_output_tokens)}</td>"
         "</tr>"
     )
 
@@ -307,14 +408,35 @@ def lifecycle_html(record: ModelRecord) -> str:
     if fact.status is FactStatus.KNOWN and isinstance(fact.value, LifecycleState):
         label = fact.value.value.capitalize()
         return f'<span class="life life-{_e(fact.value.value)}">{_e(label)}</span>'
-    return f'<span class="muted">{_e(_status_label(fact.status))}</span>'
+    return _status_html(fact.status)
 
 
 def context_html(record: ModelRecord) -> str:
     fact = record.context_window
     if fact.status is FactStatus.KNOWN and isinstance(fact.value, ContextWindow):
         return _e(format_token_count(fact.value.tokens))
-    return f'<span class="muted">{_e(_status_label(fact.status))}</span>'
+    return _status_html(fact.status)
+
+
+def token_limit_html(fact: Fact[int]) -> str:
+    if (
+        fact.status is FactStatus.KNOWN
+        and isinstance(fact.value, int)
+        and not isinstance(fact.value, bool)
+    ):
+        return _e(format_token_count(fact.value))
+    return _status_html(fact.status)
+
+
+def _status_html(status: FactStatus) -> str:
+    label = _e(_status_label(status))
+    if status is FactStatus.UNKNOWN:
+        return f'<span class="fact-unknown">{label}</span>'
+    if status is FactStatus.NOT_VERIFIED:
+        return f'<span class="fact-not-verified">{label}</span>'
+    if status is FactStatus.CONFLICT:
+        return f'<span class="fact-conflict">{label}</span>'
+    return f'<span class="muted">{label}</span>'
 
 
 def _status_label(status: FactStatus) -> str:
@@ -334,12 +456,23 @@ _CSS = (
     "dl.meta dt{font-weight:600;color:#5c574f}"
     "dl.meta dd{margin:0}"
     "ul.notices{margin:.75rem 0 0;padding-left:1.2rem}"
+    ".catalog-health{margin:.5rem 0 .75rem;padding:.1rem 0 .1rem .7rem;"
+    "border-left:3px solid #d9b08c}"
+    ".catalog-health summary{cursor:pointer;font-weight:650;color:#1d3f6e;"
+    "display:flex;flex-wrap:wrap;gap:.15rem .65rem;align-items:baseline}"
+    ".catalog-health summary .muted{font-weight:400}"
+    ".catalog-health .banner,.catalog-health ul.notices,.catalog-health p.muted"
+    "{margin:.5rem 0 0}"
+    ".fact-unknown{color:#8a857c;font-style:italic}"
+    ".fact-not-verified{color:#5c574f;font-weight:600;"
+    "border-bottom:1px dotted #8a857c}"
+    ".fact-conflict{color:#6d4a00;background:#fbf4ea;padding:.05rem .3rem}"
     "form.filters{display:flex;flex-wrap:wrap;gap:.75rem 1rem;align-items:end;margin:0 0 1rem}"
     "form.filters label{display:grid;gap:.25rem;font-size:.92rem;color:#5c574f}"
     "form.filters input,form.filters select,form.filters button{font:inherit}"
     "form.filters input,form.filters select{padding:.3rem .45rem;min-width:10rem}"
     "form.filters button{padding:.4rem .8rem;background:#1d3f6e;color:#fff;border:0;cursor:pointer}"
-    "table.models{min-width:28rem;width:100%;border-collapse:collapse;font-size:.92rem}"
+    "table.models{min-width:40rem;width:100%;border-collapse:collapse;font-size:.92rem}"
     "table.models th,table.models td{text-align:left;padding:.55rem .7rem;"
     "border-bottom:1px solid #ece7de;vertical-align:top}"
     "table.models th{font-weight:600}"

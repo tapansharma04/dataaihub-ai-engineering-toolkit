@@ -327,8 +327,23 @@ def test_context_window_and_modalities() -> None:
     )
     assert record.max_input_tokens.value == 922_000
     assert record.max_output_tokens.value == 128_000
+    assert record.context_window.value.tokens != record.max_input_tokens.value
     assert record.input_modalities.value == (Modality.TEXT, Modality.IMAGE)
     assert record.output_modalities.value == (Modality.TEXT,)
+
+
+def test_input_and_output_limits_do_not_become_context() -> None:
+    catalog = catalog_from_openai_sources(
+        (_model_page("models/input-only.md", model_page_url("input-only")),),
+        generated_at=GENERATED_AT,
+        verified_at=VERIFIED_AT,
+        overlay=CatalogOverlay.BUNDLED,
+    )
+    record = catalog.models[0]
+    assert record.max_input_tokens.value == 32_000
+    assert record.max_output_tokens.value == 8_000
+    assert record.context_window.status is FactStatus.UNKNOWN
+    assert record.context_window.value is None
 
 
 def test_tool_calling_structured_output_and_api_access() -> None:
