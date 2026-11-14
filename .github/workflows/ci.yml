@@ -20,6 +20,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Install DOM test dependency
+        run: npm ci --ignore-scripts
       - name: Install package
         run: |
           python -m pip install --upgrade pip

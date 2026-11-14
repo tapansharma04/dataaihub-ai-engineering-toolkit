@@ -29,9 +29,8 @@ let html='';process.stdin.on('data',x=>html+=x);process.stdin.on('end',()=>{
  const out=[state('empty')];click(0);out.push(state('one'));click(1);out.push(state('two'));click(2);out.push(state('three'));if(boxes.length>3){click(3);out.push(state('four'))}d.querySelector('[data-compare=clear]').click();out.push(state('clear'));
  process.stdout.write(JSON.stringify({out,labels:boxes.map(x=>x.parentElement.textContent),scripts:dom.window.samyakCompareExplorer!==undefined}));
 });"""
-    env = {**os.environ, "NODE_PATH": "/private/tmp/samyak-dom-tests/node_modules"}
     result = subprocess.run(
-        ["node", "-e", program], input=html, text=True, capture_output=True, check=True, env=env
+        ["node", "-e", program], input=html, text=True, capture_output=True, check=True
     )
     return json.loads(result.stdout)
 
@@ -82,14 +81,12 @@ let raw='';process.stdin.on('data',x=>raw+=x);process.stdin.on('end',()=>{
  }
  process.stdout.write(JSON.stringify(out));
 });"""
-    env = {**os.environ, "NODE_PATH": "/private/tmp/samyak-dom-tests/node_modules"}
     result = subprocess.run(
         ["node", "-e", program],
         input=json.dumps({"html": html, "actions": actions}),
         text=True,
         capture_output=True,
         check=True,
-        env=env,
     )
     return json.loads(result.stdout)
 
