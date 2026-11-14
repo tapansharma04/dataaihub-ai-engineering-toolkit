@@ -10,12 +10,12 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from tests.test_model_viewer import _catalog, _conflict, _known, _model, _sample_catalog
 
 from samyak.model.facts import ContextWindow, ContextWindowKind, LifecycleState, Modality
 from samyak.model.records import EvidenceDisposition
 from samyak.model.store import FileCatalogStore
 from samyak.server.model_catalog import model_href, render_model_catalog
+from test_model_viewer import _catalog, _conflict, _known, _model, _sample_catalog
 
 
 def _run_dom(html: str) -> dict[str, object]:
