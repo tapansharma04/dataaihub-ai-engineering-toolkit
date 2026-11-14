@@ -212,11 +212,27 @@ def _observations_from_deprecation_table(
     observations: list[OpenAIModelObservation] = []
     for row in table:
         cells = {_normalize_column(key): value for key, value in row.items()}
-        model_ids = _model_ids_from_cell(
-            _first_cell(cells, ("model / system", "model snapshot", "model"))
+        model_cell = _first_cell(
+            cells,
+            (
+                "model / system",
+                "model snapshot",
+                "model family / snapshot",
+                "model",
+            ),
         )
+        model_ids = _model_ids_from_cell(model_cell)
         if not model_ids:
             continue
+        # ``id \| snapshot`` is one offering. The first id is the row identity
+        # and the remaining ids stay aliases. They are not extra models and
+        # they are not the replacement column.
+        if "\\|" in model_cell:
+            identities = (model_ids[0],)
+            alias_ids = model_ids[1:]
+        else:
+            identities = model_ids
+            alias_ids = ()
         replacements = _model_ids_from_cell(
             _first_cell(
                 cells,
@@ -239,17 +255,18 @@ def _observations_from_deprecation_table(
             and retirement_at < deprecated_at
         ):
             raise OpenAIParseError(
-                f"OpenAI deprecations for {model_ids[0]} have retirement_at "
+                f"OpenAI deprecations for {identities[0]} have retirement_at "
                 "earlier than deprecated_at"
             )
         lifecycle = OpenAILifecycle.DEPRECATED
-        for model_id in model_ids:
+        for model_id in identities:
             observations.append(
                 OpenAIModelObservation(
                     provider_model_id=model_id,
                     source=source,
                     lifecycle=lifecycle,
                     deprecation_listing=listing,
+                    aliases=alias_ids or None,
                     deprecated_at=deprecated_at,
                     retirement_at=retirement_at,
                     replacements=replacements or None,

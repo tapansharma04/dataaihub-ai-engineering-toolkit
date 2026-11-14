@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from samyak.model.facts import FactStatus
 from samyak.model.http import FixtureHop, FixtureTransport, TransportSecurityError
 from samyak.model.providers.together.fetch import (
     capture_together_source,
@@ -173,6 +174,41 @@ def test_refresh_partial_when_optional_model_page_missing() -> None:
     codes = {notice.code for notice in result.notices}
     assert "PARTIAL_MODEL_PAGES:together" in codes
     assert "SOURCE_FETCH_FAILED:together-docs-model-page:glm-5.2-quickstart" in codes
+
+
+def test_glm_53_page_does_not_clear_glm_52_failure_or_partial_notice() -> None:
+    pages = _official_pages()
+    requested = model_page_url("glm-5.2-quickstart")
+    destination = model_page_url("glm-5.3-quickstart")
+    pages[requested] = FixtureHop(status=307, location=destination)
+    result = refresh_together_catalog(
+        _transport(pages),
+        generated_at=STAMP,
+        verified_at=STAMP,
+    )
+    assert result.ok is True
+    assert result.partial is True
+    assert result.catalog is not None
+    codes = {notice.code for notice in result.notices}
+    assert "PARTIAL_MODEL_PAGES:together" in codes
+    assert "SOURCE_FETCH_FAILED:together-docs-model-page:glm-5.2-quickstart" in codes
+    assert "SOURCE_FETCH_FAILED:together-docs-model-page:glm-5.3-quickstart" not in codes
+    assert "SOURCE_FETCH_FAILED:together-docs-model-page:kimi-k2.6-quickstart" not in codes
+    ids = [item.samyak_id for item in result.catalog.models]
+    assert ids.count("together:zai-org/GLM-5.3") == 1
+    assert ids.count("together:zai-org/GLM-5.3-Flash") == 1
+    assert ids.count("together:zai-org/GLM-5.2") == 1
+    glm52 = next(
+        item for item in result.catalog.models if item.samyak_id == "together:zai-org/GLM-5.2"
+    )
+    assert glm52.provider_model_id == "zai-org/GLM-5.2"
+    assert glm52.max_output_tokens.status is FactStatus.UNKNOWN
+    flagship = next(
+        item for item in result.catalog.models if item.samyak_id == "together:zai-org/GLM-5.3"
+    )
+    assert flagship.provider_model_id == "zai-org/GLM-5.3"
+    assert flagship.display_name.value == "GLM-5.3"
+    assert flagship.context_window.status is FactStatus.UNKNOWN
 
 
 def test_refresh_partial_when_optional_changelog_missing() -> None:

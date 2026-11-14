@@ -28,6 +28,7 @@ class LifecycleChangeType(StrEnum):
 
     ADDED = "added"
     REMOVED = "removed"
+    DOCUMENTATION_CHANGED = "documentation_changed"
     LIFECYCLE_CHANGED = "lifecycle_changed"
     DEPRECATION_DATE_CHANGED = "deprecation_date_changed"
     RETIREMENT_DATE_CHANGED = "retirement_date_changed"
@@ -37,10 +38,11 @@ class LifecycleChangeType(StrEnum):
 _CHANGE_TYPE_ORDER = {
     LifecycleChangeType.ADDED: 0,
     LifecycleChangeType.REMOVED: 1,
-    LifecycleChangeType.LIFECYCLE_CHANGED: 2,
-    LifecycleChangeType.DEPRECATION_DATE_CHANGED: 3,
-    LifecycleChangeType.RETIREMENT_DATE_CHANGED: 4,
-    LifecycleChangeType.REPLACEMENT_CHANGED: 5,
+    LifecycleChangeType.DOCUMENTATION_CHANGED: 2,
+    LifecycleChangeType.LIFECYCLE_CHANGED: 3,
+    LifecycleChangeType.DEPRECATION_DATE_CHANGED: 4,
+    LifecycleChangeType.RETIREMENT_DATE_CHANGED: 5,
+    LifecycleChangeType.REPLACEMENT_CHANGED: 6,
 }
 
 
@@ -123,6 +125,16 @@ def _records_for_provider(catalog: ModelCatalog, provider_id: str) -> dict[str, 
 def _record_fact_changes(
     samyak_id: str, previous: ModelRecord, current: ModelRecord
 ) -> tuple[LifecycleChange, ...]:
+    changes: list[LifecycleChange] = []
+    if previous.evidence_disposition != current.evidence_disposition:
+        changes.append(
+            LifecycleChange(
+                change_type=LifecycleChangeType.DOCUMENTATION_CHANGED,
+                samyak_id=samyak_id,
+                previous=previous,
+                current=current,
+            )
+        )
     comparisons = (
         (LifecycleChangeType.LIFECYCLE_CHANGED, previous.lifecycle, current.lifecycle),
         (
@@ -141,7 +153,7 @@ def _record_fact_changes(
             current.replacement,
         ),
     )
-    return tuple(
+    changes.extend(
         LifecycleChange(
             change_type=change_type,
             samyak_id=samyak_id,
@@ -151,6 +163,7 @@ def _record_fact_changes(
         for change_type, before, after in comparisons
         if not facts_semantically_equal(before, after)
     )
+    return tuple(changes)
 
 
 def _semantic_key(fact: Fact) -> tuple[object, ...]:

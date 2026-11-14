@@ -19,7 +19,9 @@ from samyak.model.http import (
     HttpTransport,
     TransportError,
     TransportPolicy,
+    reraise_fetch,
     user_agent,
+    with_redirect_rejection,
 )
 from samyak.model.providers.fireworks.adapter import catalog_from_fireworks_sources
 from samyak.model.providers.fireworks.errors import (
@@ -31,6 +33,7 @@ from samyak.model.providers.fireworks.parse import parse_fireworks_sources
 from samyak.model.providers.fireworks.sources import (
     DOCS_HOST,
     DOCS_PATH_PREFIXES,
+    PROVIDER_ID,
     CapturedSource,
     FireworksSourceDescriptor,
     FireworksSourceType,
@@ -39,6 +42,12 @@ from samyak.model.providers.fireworks.sources import (
     model_page_source_id_from_url,
     optional_source_descriptors,
     required_source_descriptors,
+)
+from samyak.model.source_archive import (
+    SourceArchive,
+    note_captured,
+    note_failure,
+    note_parse_failure,
 )
 
 _NOTICE_PARTIAL = "PARTIAL_MODEL_PAGES:fireworks"
@@ -91,12 +100,15 @@ def capture_fireworks_source(
     try:
         response = transport.get(descriptor.url)
     except TransportError as exc:
-        raise FireworksFetchError(str(exc)) from exc
+        reraise_fetch(FireworksFetchError, exc)
     if response.status < 200 or response.status >= 300:
         raise FireworksFetchError(
             f"Fireworks documentation {descriptor.source_id} returned HTTP {response.status}"
         )
-    _assert_final_document(descriptor, response.final_url)
+    try:
+        _assert_final_document(descriptor, response.final_url)
+    except FireworksFetchError as exc:
+        raise with_redirect_rejection(exc, response) from None
     try:
         body = response.body.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -105,8 +117,11 @@ def capture_fireworks_source(
     if descriptor.source_type is FireworksSourceType.MODEL_PAGE:
         source_id = model_page_source_id_from_url(response.final_url)
         if source_id != descriptor.source_id:
-            raise FireworksFetchError(
-                "Fireworks model page redirected to a different documentation document"
+            raise with_redirect_rejection(
+                FireworksFetchError(
+                    "Fireworks model page redirected to a different documentation document"
+                ),
+                response,
             )
     return captured_markdown(
         source_id=source_id,
@@ -122,6 +137,7 @@ def refresh_fireworks_catalog(
     generated_at: str,
     verified_at: str,
     overlay: CatalogOverlay = CatalogOverlay.USER_CACHE,
+    diagnostics: SourceArchive | None = None,
 ) -> FireworksRefreshResult:
     """Fetch official sources and build a catalog in memory.
 
@@ -134,9 +150,20 @@ def refresh_fireworks_catalog(
     captured: list[CapturedSource] = []
     try:
         for descriptor in required_source_descriptors():
-            captured.append(capture_fireworks_source(transport, descriptor))
+            try:
+                source = capture_fireworks_source(transport, descriptor)
+            except (FireworksFetchError, TransportError) as exc:
+                note_failure(diagnostics, PROVIDER_ID, descriptor.source_id, descriptor.url, exc)
+                raise
+            note_captured(diagnostics, PROVIDER_ID, source)
+            captured.append(source)
         parse_fireworks_sources(tuple(captured))
-    except (FireworksFetchError, FireworksParseError, FireworksAdapterError, TransportError) as exc:
+    except (FireworksFetchError, TransportError) as exc:
+        return FireworksRefreshResult(
+            ok=False, catalog=None, error=str(exc), notices=(), partial=False
+        )
+    except (FireworksParseError, FireworksAdapterError) as exc:
+        note_parse_failure(diagnostics, PROVIDER_ID, captured, exc)
         return FireworksRefreshResult(
             ok=False, catalog=None, error=str(exc), notices=(), partial=False
         )
@@ -146,15 +173,18 @@ def refresh_fireworks_catalog(
     for descriptor in optional_source_descriptors():
         try:
             page = capture_fireworks_source(transport, descriptor)
-        except (FireworksFetchError, TransportError):
+        except (FireworksFetchError, TransportError) as exc:
+            note_failure(diagnostics, PROVIDER_ID, descriptor.source_id, descriptor.url, exc)
             optional_failures.append(_detail_failure_notice(descriptor, parsed=False))
             continue
+        note_captured(diagnostics, PROVIDER_ID, page)
         try:
             parse_fireworks_sources((page,))
         except (FireworksParseError, FireworksAdapterError) as exc:
             if _empty_optional_guide(descriptor, exc):
                 captured.append(page)
                 continue
+            note_failure(diagnostics, PROVIDER_ID, descriptor.source_id, descriptor.url, exc)
             optional_failures.append(_detail_failure_notice(descriptor, parsed=True))
             continue
         captured.append(page)
@@ -182,6 +212,7 @@ def refresh_fireworks_catalog(
             notices=tuple(notices),
         )
     except (FireworksParseError, FireworksAdapterError) as exc:
+        note_parse_failure(diagnostics, PROVIDER_ID, captured, exc)
         return FireworksRefreshResult(
             ok=False,
             catalog=None,

@@ -36,7 +36,11 @@ from samyak.model.facts import (
     identity_from_mapping,
 )
 from samyak.model.identity import IdentityKind, ModelIdentity
-from samyak.model.records import ModelRecord, replacement_identities_from_json
+from samyak.model.records import (
+    EvidenceDisposition,
+    ModelRecord,
+    replacement_identities_from_json,
+)
 
 _CATALOG_FIELDS = frozenset(
     {
@@ -101,6 +105,7 @@ _RECORD_FIELDS = frozenset(
         "availability_scope",
         "regions",
         "observed_sources",
+        "evidence_disposition",
     }
 )
 
@@ -211,7 +216,12 @@ def _notice_from_dict(data: object, index: int) -> CatalogNotice:
 
 def _record_from_dict(data: object, index: int) -> ModelRecord:
     prefix = f"models[{index}]"
-    mapping = _require_object(prefix, data, _RECORD_FIELDS)
+    mapping = _require_object(
+        prefix,
+        data,
+        _RECORD_FIELDS,
+        optional=frozenset({"evidence_disposition"}),
+    )
     identity = ModelIdentity(
         provider_id=_require_str(f"{prefix}.provider_id", mapping.get("provider_id")),
         provider_model_id=_require_str(
@@ -231,10 +241,14 @@ def _record_from_dict(data: object, index: int) -> ModelRecord:
     observed = tuple(
         _require_str(f"{prefix}.observed_sources[{i}]", item) for i, item in enumerate(sources)
     )
+    disposition = _evidence_disposition(
+        f"{prefix}.evidence_disposition", mapping.get("evidence_disposition")
+    )
     try:
         record = ModelRecord(
             identity=identity,
             identity_kind=kind,
+            evidence_disposition=disposition,
             display_name=_fact(f"{prefix}.display_name", mapping.get("display_name"), _as_str),
             aliases=_fact(f"{prefix}.aliases", mapping.get("aliases"), _as_str_tuple),
             resolves_to=_fact(f"{prefix}.resolves_to", mapping.get("resolves_to"), _as_identity),
@@ -424,13 +438,19 @@ def _as_context_window(name: str, value: object) -> ContextWindow:
     return ContextWindow(tokens=tokens, kind=kind)
 
 
-def _require_object(name: str, data: object, allowed: frozenset[str]) -> Mapping[str, Any]:
+def _require_object(
+    name: str,
+    data: object,
+    allowed: frozenset[str],
+    *,
+    optional: frozenset[str] = frozenset(),
+) -> Mapping[str, Any]:
     if not isinstance(data, Mapping):
         raise CatalogDecodeError(f"{name} must be an object")
     extra = set(data) - allowed
     if extra:
         raise CatalogDecodeError(f"{name} has unexpected fields: {sorted(extra)}")
-    missing = allowed - set(data)
+    missing = (allowed - optional) - set(data)
     if missing:
         raise CatalogDecodeError(f"{name} is missing fields: {sorted(missing)}")
     return data
@@ -446,3 +466,12 @@ def _optional_str(name: str, value: object) -> str | None:
     if value is None:
         return None
     return _require_str(name, value)
+
+
+def _evidence_disposition(name: str, value: object) -> EvidenceDisposition | None:
+    if value is None:
+        return None
+    try:
+        return EvidenceDisposition(_require_str(name, value))
+    except ValueError as exc:
+        raise CatalogDecodeError(f"{name} is not a known evidence disposition") from exc

@@ -18,7 +18,7 @@ Corpus Intelligence inspects a local document directory, collects evidence, expl
 
 Keep a local catalog of provider-documented API models, verified from official documentation rather than guessed from marketing pages or live API probes.
 
-v0.3.0 covers these serving sources: **anthropic**, **fireworks**, **google**, **openai**, and **together**. Refresh one provider, or refresh all of them sequentially with `samyak model update all`. Other providers' records stay in the overlay.
+v0.4.0 covers these serving sources: **anthropic**, **fireworks**, **google**, **openai**, and **together**. Refresh one provider, or refresh all of them sequentially with `samyak model update all`. Other providers' records stay in the overlay.
 
 ```bash
 samyak model update openai
@@ -30,6 +30,41 @@ samyak view
 
 There is no `samyak model list` or `samyak model show`. Model Intelligence is not a pricing, ranking, or recommendation product.
 
+## Offline Model Catalog and Comparison
+
+Acquire provider documentation into the local catalog, then start the loopback-only viewer:
+
+```bash
+samyak model update all
+samyak view
+```
+
+`samyak model update` is the supported acquisition command; it is the only
+networked model workflow. `samyak view` opens the local workspace, where the
+**Model Catalog** is available after acquisition. The viewer uses the saved
+catalog only: it does not refresh providers or send catalog data elsewhere.
+
+In the catalog, select two or three model checkboxes to open a comparison. The
+comparison preserves the order in which models were selected. Remove an
+individual selection with its checkbox, or use **Clear selection** to reset the
+comparison. The three-model maximum is enforced in the browser. Explorer
+filters are client-side and can hide catalog rows, but they do not discard an
+existing comparison selection.
+
+Comparisons are strict by default: only `current_documented` records are
+eligible. Enable the explicit legacy or historical documentation options only
+when you need to inspect those records; an opt-in does not certify current
+availability. Each comparison includes provider and documentation-disposition
+rows, stable model IDs, display names, and detail links.
+
+Facts retain their recorded evidence. Expand **Evidence** to inspect source
+identifiers and verification timestamps. Conflicting facts remain separate
+claims with their own values and sources; Samyak does not resolve them. Context
+windows are directly comparable only when their verified measurement kinds are
+compatible. An unknown availability scope is not a claim about account,
+region, deployment, or API access. On narrow screens, scroll the comparison
+workspace horizontally to inspect all selected columns.
+
 ## Who it is for
 
 - AI / ML engineers preparing document corpora for RAG or other retrieval workflows
@@ -37,7 +72,7 @@ There is no `samyak model list` or `samyak model show`. Model Intelligence is no
 - Data engineers validating knowledge-base handoffs
 - Platform and QA teams adding corpus checks to local workflows or CI
 
-## Features (v0.3.0)
+## Features (v0.4.0)
 
 - Corpus inventory (supported / unsupported / analyzed, by format)
 - Empty and whitespace-only document detection
@@ -60,6 +95,7 @@ There is no `samyak model list` or `samyak model show`. Model Intelligence is no
 - `samyak model update` for one serving source, or `samyak model update all` (the only network commands; no API key)
 - Offline model-catalog browsing in `samyak view` after a refresh
 - `samyak model history` to inspect previously observed documented lifecycle changes (local; no network)
+- `samyak model query` for evidence-aware local capability queries over the saved model catalog
 
 ## Privacy / local processing
 
@@ -192,8 +228,137 @@ samyak view --help
 samyak model --help
 samyak model update --help
 samyak model history --help
+samyak model query --help
 samyak --version
 ```
+
+### Model capability queries
+
+`samyak model query` is read-only and uses verified facts from the local
+catalog. By default it includes only records explicitly marked
+`current_documented`; use `--include-legacy` to additionally inspect legacy
+records, or repeat `--documentation` to include a named historical category.
+Those options do not certify current availability.
+
+```bash
+samyak model query --tool-calling true
+samyak model query --input-modality text --input-modality image --format json
+samyak model query --min-context 100000 --context-kind input
+```
+
+Add `--explain` to show evidence-safe predicate explanations. JSON output gains
+an additive `explanations` field only with that flag. Exclusion reason counts
+can overlap: an excluded record may fail more than one predicate. Missing
+verified evidence is not a verified negative, and zero verified matches does
+not prove that no model is capable or currently available to an account.
+
+Unknown, unverified, and conflicting facts do not match either boolean value.
+Context limits are compared only within the explicitly selected kind; combined
+and input windows are not converted. A matching capability remains evidence
+about documented provider behavior, not a guarantee for a particular account,
+region, or deployment surface.
+
+### Model comparisons
+
+Compare two or three explicit stable model IDs from the saved catalog:
+
+```bash
+samyak model compare google:gemini-2.5-flash google:gemini-2.5-pro
+samyak model compare google:gemini-2.5-flash anthropic:claude-fable-5 fireworks:accounts/fireworks/models/kimi-k2p5 --format json
+```
+
+Comparison is strict-current-documentation by default; use `--include-legacy`
+or repeated `--documentation` only to inspect a named uncertified category.
+Cells retain verified yes/no, unknown, not-verified, and conflicting evidence
+states with provenance. Context windows are directly comparable only when their
+verified kinds match; the command does not choose a best model.
+
+### Model catalog capability explorer
+
+The local Model Catalog page includes a collapsed capability explorer. It
+refines only the rows selected by the page's URL search, provider, and
+lifecycle filters; it never expands that server-rendered universe. The browser
+uses each record's stable `samyak_id` to map matching facts back to a rendered
+row, so display names and row order do not affect filtering.
+
+The default documentation selection is `current_documented`. Legacy,
+historical-reference, and not-observed records require an explicit checkbox.
+Capability filters match only verified known facts: unknown, unverified, and
+conflicting facts match neither `true` nor `false`. Multiple input or output
+modalities are conjunctive. A context threshold also requires its matching
+context kind; kinds are never converted.
+
+The match count is reported against the documentation-eligible records in the
+already URL-filtered scope. Clear restores current-documentation-only browser
+filters without changing URL filters. The page and its embedded fact index work
+offline; they reflect the saved catalog's freshness and do not fetch providers.
+
+The explorer's **Why this result** panel can inspect one model from that
+server-scoped page at a time. It displays the saved fact state, source IDs,
+verification timestamps, and a link to its local evidence details. The browser
+does not fetch providers or infer missing capabilities; a zero verified match
+is explicitly not evidence that no capable model exists.
+
+### Application Readiness
+
+`samyak app check PATH` inspects a local application project for model
+references, AI operations whose model identity cannot be established, and
+lifecycle findings from the saved Model Intelligence catalog. It analyzes
+Python, JSON, and TOML files only; generated, vendored, virtual-environment,
+and version-control directories are skipped.
+
+```bash
+samyak app check ./my-ai-service
+samyak app check ./my-ai-service --format json --output app-readiness.json
+```
+
+The supported formats are `text` and `json`. The command reads source files
+one at a time and reads the local catalog when it is present. It is offline and
+read-only: it does not execute application code, inspect provider accounts,
+call provider APIs, refresh the catalog, or inspect unsupported file types.
+Binary, oversized, unparsable, and out-of-scope files are reported as notices
+or skipped; they are not silently treated as evidence.
+
+Catalog matches can be established, resolved, ambiguous, or absent. A finding
+about lifecycle reflects the saved catalog evidence, not a guarantee about an
+account, region, deployment, runtime path, or application readiness. Finding
+counts are inventory, not a readiness score.
+
+### Model export
+
+`samyak model export` writes a versioned JSON wrapper around the local catalog
+and, when present, its lifecycle history. It is read-only and offline: it does
+not refresh or modify either local file.
+
+```bash
+samyak model export > model-export.json
+samyak model export --output model-export.json
+samyak model export --require-complete --output model-export.json
+```
+
+JSON is the only export format. Without `--output`, JSON is written to stdout;
+with `--output`, the destination is overwritten, except that Samyak refuses to
+replace its catalog or lifecycle-history files. `--require-complete` exits with
+status 2 and writes nothing when the snapshot is not complete enough for
+publication.
+
+The wrapper has a versioned contract (`export_schema_version`), carries the
+catalog's documentation dispositions and fact provenance, and preserves
+unknown, unverified, and conflicting facts rather than resolving them. A
+conflicting fact retains its individual claims and their provenance. Consumers
+must use `publication.status` and `publication.reasons`; a saved catalog is not
+by itself a claim that all provider coverage is complete. See
+[`docs/model-export-contract.md`](docs/model-export-contract.md) for the
+consumer contract.
+
+### Archived-evidence diagnostic
+
+`samyak model diagnose-overrides` is an advanced, read-only diagnostic for
+completed source-archive generations created with `samyak model update
+--archive-sources`. It re-parses selected archived evidence and reports
+supporting observations, source-rank overrides, and conflicts. It never
+refreshes providers or writes the catalog, history, or archive. It is for
+reproducibility investigation, not normal catalog use or publication.
 
 The `examples/sample-corpus` directory is in this Git repository (and the source distribution). It is **not** included when you `pip install samyak`. After installing Samyak, clone the repository and analyze the example directory:
 
@@ -229,7 +394,7 @@ Samyak Corpus Intelligence Report
 
 Product:                  samyak
 Capability:               corpus
-Version:                  0.3.0
+Version:                  0.4.0
 
 Corpus
 ------
@@ -273,7 +438,7 @@ Example identity fields:
 {
   "product": "samyak",
   "capability": "corpus",
-  "version": "0.3.0"
+  "version": "0.4.0"
 }
 ```
 

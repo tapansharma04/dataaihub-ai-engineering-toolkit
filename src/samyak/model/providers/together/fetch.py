@@ -19,7 +19,9 @@ from samyak.model.http import (
     HttpTransport,
     TransportError,
     TransportPolicy,
+    reraise_fetch,
     user_agent,
+    with_redirect_rejection,
 )
 from samyak.model.providers.together.adapter import catalog_from_together_sources
 from samyak.model.providers.together.errors import (
@@ -31,6 +33,7 @@ from samyak.model.providers.together.parse import parse_together_sources
 from samyak.model.providers.together.sources import (
     DOCS_HOST,
     DOCS_PATH_PREFIX,
+    PROVIDER_ID,
     CapturedSource,
     TogetherSourceDescriptor,
     TogetherSourceType,
@@ -39,6 +42,12 @@ from samyak.model.providers.together.sources import (
     model_page_source_id_from_url,
     optional_source_descriptors,
     required_source_descriptors,
+)
+from samyak.model.source_archive import (
+    SourceArchive,
+    note_captured,
+    note_failure,
+    note_parse_failure,
 )
 
 _NOTICE_PARTIAL = "PARTIAL_MODEL_PAGES:together"
@@ -90,12 +99,15 @@ def capture_together_source(
     try:
         response = transport.get(descriptor.url)
     except TransportError as exc:
-        raise TogetherFetchError(str(exc)) from exc
+        reraise_fetch(TogetherFetchError, exc)
     if response.status < 200 or response.status >= 300:
         raise TogetherFetchError(
             f"Together documentation {descriptor.source_id} returned HTTP {response.status}"
         )
-    _assert_final_document(descriptor, response.final_url)
+    try:
+        _assert_final_document(descriptor, response.final_url)
+    except TogetherFetchError as exc:
+        raise with_redirect_rejection(exc, response) from None
     try:
         body = response.body.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -104,8 +116,11 @@ def capture_together_source(
     if descriptor.source_type is TogetherSourceType.MODEL_PAGE:
         source_id = model_page_source_id_from_url(response.final_url)
         if source_id != descriptor.source_id:
-            raise TogetherFetchError(
-                "Together model page redirected to a different documentation document"
+            raise with_redirect_rejection(
+                TogetherFetchError(
+                    "Together model page redirected to a different documentation document"
+                ),
+                response,
             )
     return captured_markdown(
         source_id=source_id,
@@ -121,6 +136,7 @@ def refresh_together_catalog(
     generated_at: str,
     verified_at: str,
     overlay: CatalogOverlay = CatalogOverlay.USER_CACHE,
+    diagnostics: SourceArchive | None = None,
 ) -> TogetherRefreshResult:
     """Fetch official sources and build a catalog in memory.
 
@@ -134,9 +150,20 @@ def refresh_together_catalog(
     captured: list[CapturedSource] = []
     try:
         for descriptor in required_source_descriptors():
-            captured.append(capture_together_source(transport, descriptor))
+            try:
+                source = capture_together_source(transport, descriptor)
+            except (TogetherFetchError, TransportError) as exc:
+                note_failure(diagnostics, PROVIDER_ID, descriptor.source_id, descriptor.url, exc)
+                raise
+            note_captured(diagnostics, PROVIDER_ID, source)
+            captured.append(source)
         parse_together_sources(tuple(captured))
-    except (TogetherFetchError, TogetherParseError, TogetherAdapterError, TransportError) as exc:
+    except (TogetherFetchError, TransportError) as exc:
+        return TogetherRefreshResult(
+            ok=False, catalog=None, error=str(exc), notices=(), partial=False
+        )
+    except (TogetherParseError, TogetherAdapterError) as exc:
+        note_parse_failure(diagnostics, PROVIDER_ID, captured, exc)
         return TogetherRefreshResult(
             ok=False, catalog=None, error=str(exc), notices=(), partial=False
         )
@@ -146,15 +173,18 @@ def refresh_together_catalog(
     for descriptor in optional_source_descriptors():
         try:
             page = capture_together_source(transport, descriptor)
-        except (TogetherFetchError, TransportError):
+        except (TogetherFetchError, TransportError) as exc:
+            note_failure(diagnostics, PROVIDER_ID, descriptor.source_id, descriptor.url, exc)
             optional_failures.append(_detail_failure_notice(descriptor, parsed=False))
             continue
+        note_captured(diagnostics, PROVIDER_ID, page)
         try:
             parse_together_sources((page,))
         except (TogetherParseError, TogetherAdapterError) as exc:
             if _empty_optional_document(descriptor, exc):
                 captured.append(page)
                 continue
+            note_failure(diagnostics, PROVIDER_ID, descriptor.source_id, descriptor.url, exc)
             optional_failures.append(_detail_failure_notice(descriptor, parsed=True))
             continue
         captured.append(page)
@@ -181,6 +211,7 @@ def refresh_together_catalog(
             notices=tuple(notices),
         )
     except (TogetherParseError, TogetherAdapterError) as exc:
+        note_parse_failure(diagnostics, PROVIDER_ID, captured, exc)
         return TogetherRefreshResult(
             ok=False,
             catalog=None,

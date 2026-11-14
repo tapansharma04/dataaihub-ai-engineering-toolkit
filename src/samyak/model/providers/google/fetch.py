@@ -18,7 +18,9 @@ from samyak.model.http import (
     HttpTransport,
     TransportError,
     TransportPolicy,
+    reraise_fetch,
     user_agent,
+    with_redirect_rejection,
 )
 from samyak.model.providers.google.adapter import catalog_from_google_sources
 from samyak.model.providers.google.errors import (
@@ -30,6 +32,7 @@ from samyak.model.providers.google.parse import discover_model_page_identities, 
 from samyak.model.providers.google.sources import (
     DOCS_HOST,
     DOCS_PATH_PREFIX,
+    PROVIDER_ID,
     CapturedSource,
     GoogleSourceDescriptor,
     GoogleSourceType,
@@ -38,6 +41,12 @@ from samyak.model.providers.google.sources import (
     model_page_descriptor,
     model_page_source_id_from_url,
     required_source_descriptors,
+)
+from samyak.model.source_archive import (
+    SourceArchive,
+    note_captured,
+    note_failure,
+    note_parse_failure,
 )
 
 _NOTICE_PARTIAL = "PARTIAL_MODEL_PAGES:google"
@@ -88,12 +97,15 @@ def capture_google_source(
     try:
         response = transport.get(descriptor.url)
     except TransportError as exc:
-        raise GoogleFetchError(str(exc)) from exc
+        reraise_fetch(GoogleFetchError, exc)
     if response.status < 200 or response.status >= 300:
         raise GoogleFetchError(
             f"Google documentation {descriptor.source_id} returned HTTP {response.status}"
         )
-    _assert_final_document(descriptor, response.final_url)
+    try:
+        _assert_final_document(descriptor, response.final_url)
+    except GoogleFetchError as exc:
+        raise with_redirect_rejection(exc, response) from None
     try:
         body = response.body.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -102,8 +114,11 @@ def capture_google_source(
     if descriptor.source_type is GoogleSourceType.MODEL_PAGE:
         source_id = model_page_source_id_from_url(response.final_url)
         if source_id != descriptor.source_id:
-            raise GoogleFetchError(
-                "Google model page redirected to a different documentation document"
+            raise with_redirect_rejection(
+                GoogleFetchError(
+                    "Google model page redirected to a different documentation document"
+                ),
+                response,
             )
     return captured_markdown(
         source_id=source_id,
@@ -119,6 +134,7 @@ def refresh_google_catalog(
     generated_at: str,
     verified_at: str,
     overlay: CatalogOverlay = CatalogOverlay.USER_CACHE,
+    diagnostics: SourceArchive | None = None,
 ) -> GoogleRefreshResult:
     """Fetch official sources and build a catalog in memory.
 
@@ -130,9 +146,20 @@ def refresh_google_catalog(
     captured: list[CapturedSource] = []
     try:
         for descriptor in required_source_descriptors():
-            captured.append(capture_google_source(transport, descriptor))
+            try:
+                source = capture_google_source(transport, descriptor)
+            except (GoogleFetchError, TransportError) as exc:
+                note_failure(diagnostics, PROVIDER_ID, descriptor.source_id, descriptor.url, exc)
+                raise
+            note_captured(diagnostics, PROVIDER_ID, source)
+            captured.append(source)
         parse_google_sources(tuple(captured))
-    except (GoogleFetchError, GoogleParseError, GoogleAdapterError, TransportError) as exc:
+    except (GoogleFetchError, TransportError) as exc:
+        return GoogleRefreshResult(
+            ok=False, catalog=None, error=str(exc), notices=(), partial=False
+        )
+    except (GoogleParseError, GoogleAdapterError) as exc:
+        note_parse_failure(diagnostics, PROVIDER_ID, captured, exc)
         return GoogleRefreshResult(
             ok=False, catalog=None, error=str(exc), notices=(), partial=False
         )
@@ -146,11 +173,19 @@ def refresh_google_catalog(
         descriptor = model_page_descriptor(page_id)
         try:
             page = capture_google_source(transport, descriptor)
-            parse_google_sources((page,))
-        except (GoogleFetchError, TransportError):
+        except (GoogleFetchError, TransportError) as exc:
+            note_failure(diagnostics, PROVIDER_ID, descriptor.source_id, descriptor.url, exc)
             notices.append(_detail_failure_notice(descriptor, parsed=False))
             continue
-        except (GoogleParseError, GoogleAdapterError):
+        note_captured(diagnostics, PROVIDER_ID, page)
+        try:
+            parse_google_sources((page,))
+        except (GoogleFetchError, TransportError) as exc:
+            note_failure(diagnostics, PROVIDER_ID, descriptor.source_id, descriptor.url, exc)
+            notices.append(_detail_failure_notice(descriptor, parsed=False))
+            continue
+        except (GoogleParseError, GoogleAdapterError) as exc:
+            note_failure(diagnostics, PROVIDER_ID, descriptor.source_id, descriptor.url, exc)
             notices.append(_detail_failure_notice(descriptor, parsed=True))
             continue
         captured.append(page)
@@ -177,6 +212,7 @@ def refresh_google_catalog(
             notices=tuple(notices),
         )
     except (GoogleParseError, GoogleAdapterError) as exc:
+        note_parse_failure(diagnostics, PROVIDER_ID, captured, exc)
         return GoogleRefreshResult(
             ok=False,
             catalog=None,

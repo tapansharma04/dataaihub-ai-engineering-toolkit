@@ -23,12 +23,20 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from datetime import date
+from urllib.parse import urlparse
 
 from samyak.model.identity import IdentityKind
-from samyak.model.markdown import code_spans, normalize_heading, pipe_tables, split_sections
+from samyak.model.markdown import (
+    code_spans,
+    normalize_heading,
+    pipe_tables,
+    split_sections,
+    unwrap_blockquote_pipe_row,
+)
 from samyak.model.providers.fireworks.errors import FireworksParseError
 from samyak.model.providers.fireworks.observations import (
     FireworksLifecycle,
+    FireworksLifecycleScope,
     FireworksModelObservation,
     FireworksSourceRef,
 )
@@ -41,7 +49,15 @@ _PLACEHOLDER = re.compile(r"[<>]|ACCOUNT_ID|DEPLOYMENT_ID|YOUR_")
 _MODEL_KWARG = re.compile(
     r"""(?:\bmodel\s*=\s*|["']model["']\s*:\s*)["']([^"']+)["']""",
 )
+_MINTLIFY_TAB = re.compile(r"^>[ \t]*\[tab\](?:\s|$)")
 _LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+_CHANGELOG_CANONICAL_ID = re.compile(
+    r"(?<![A-Za-z0-9._/-])"
+    r"(accounts/fireworks/(?:models|routers)/[a-z0-9][a-z0-9._-]*|"
+    r"fireworks/[a-z0-9][a-z0-9._-]*)"
+    r"(?![A-Za-z0-9._/-])"
+)
+_CHANGELOG_BULLET = re.compile(r"(?m)^\s*[-*+]\s+")
 _ENGLISH_DATE = re.compile(
     r"(?P<month>January|February|March|April|May|June|July|August|"
     r"September|October|November|December)\s+(?P<day>\d{1,2}),?\s+(?P<year>\d{4})",
@@ -89,6 +105,26 @@ def parse_fireworks_sources(
     return tuple(observations)
 
 
+def parse_fireworks_source(
+    source: CapturedSource,
+) -> tuple[FireworksModelObservation, ...]:
+    """Parse one captured document without requiring it to name a model.
+
+    A changelog can be structurally valid while having no lifecycle event the
+    supported identity rules can associate with a serving model. Production
+    validates the aggregate source set; archive diagnostics preserve
+    source-level attribution and therefore use this entry point.
+    """
+    try:
+        return _parse_source(source)
+    except FireworksParseError:
+        raise
+    except (TypeError, ValueError, KeyError, IndexError) as exc:
+        raise FireworksParseError(
+            f"Fireworks documentation {source.source_id} could not be parsed"
+        ) from exc
+
+
 def _parse_source(source: CapturedSource) -> tuple[FireworksModelObservation, ...]:
     if source.media_type != "text/markdown":
         raise FireworksParseError(
@@ -125,7 +161,11 @@ def _parse_embeddings(source: CapturedSource) -> tuple[FireworksModelObservation
         raise FireworksParseError("Fireworks embeddings page is missing embeddings documentation")
     ref = _source_ref(source)
     observations: list[FireworksModelObservation] = []
-    for section in split_sections(source.body):
+    # Mintlify ``[tab]`` blocks quote every line, including pipe tables. The
+    # 30 October embeddings page left a legacy model table inside an accordion
+    # blockquote; that table stays quoted so it is not newly ingested.
+    tabulated = _promote_mintlify_tab_pipe_tables(source.body)
+    for section in split_sections(tabulated):
         hint = _embeddings_serverless_hint(f"{section.title}\n{section.body}")
         for table in pipe_tables(section.body):
             observations.extend(
@@ -189,6 +229,27 @@ def _embeddings_table_observations(
                 )
             )
     return tuple(observations)
+
+
+def _promote_mintlify_tab_pipe_tables(text: str) -> str:
+    """Unwrap pipe rows that sit inside a Mintlify ``[tab]`` blockquote.
+
+    A tab is the contiguous run of ``>`` lines that begins with ``[tab]``.
+    Only a line whose content is a pipe row is rewritten. Accordion
+    blockquotes and quoted prose are left as they appear in the source.
+    """
+    lines = text.split("\n")
+    promoted: list[str] = []
+    index = 0
+    while index < len(lines):
+        if _MINTLIFY_TAB.match(lines[index]) is None:
+            promoted.append(lines[index])
+            index += 1
+            continue
+        while index < len(lines) and lines[index].startswith(">"):
+            promoted.append(unwrap_blockquote_pipe_row(lines[index]))
+            index += 1
+    return "\n".join(promoted)
 
 
 def _embeddings_serverless_hint(text: str) -> bool | None:
@@ -286,8 +347,17 @@ def _parse_changelog(source: CapturedSource) -> tuple[FireworksModelObservation,
         raise FireworksParseError("Fireworks changelog is missing deprecation documentation")
     ref = _source_ref(source)
     observations: list[FireworksModelObservation] = []
+    for event, listing in _changelog_event_blocks(source.body):
+        observations.extend(_changelog_event_observations(event, source=ref, listing=listing))
+    return _dedupe_changelog_events(observations)
+
+
+def _changelog_event_blocks(markdown: str) -> tuple[tuple[str, str], ...]:
+    """Group a lifecycle heading with its lower-level Markdown sections."""
+    sections = split_sections(markdown)
+    events: list[tuple[str, str]] = []
     listing = "schedule"
-    for section in split_sections(source.body):
+    for index, section in enumerate(sections):
         heading = normalize_heading(section.title)
         if heading.startswith("current"):
             listing = "current"
@@ -295,63 +365,298 @@ def _parse_changelog(source: CapturedSource) -> tuple[FireworksModelObservation,
             listing = "upcoming"
         elif heading.startswith("past"):
             listing = "past"
-        for chunk in _changelog_units(section.body):
-            if not _model_ids_from_cell(chunk, allow_hf=True):
+        blocks = tuple(part for part in re.split(r"\n\s*\n", section.body) if part)
+        children = []
+        for child in sections[index + 1 :]:
+            if child.level <= section.level:
+                break
+            if _changelog_child_is_relevant(child.title):
+                children.append(f"{'#' * child.level} {child.title}\n{child.body}".strip())
+        for block_index, block in enumerate(blocks):
+            if _changelog_lifecycle(block)[0] is None:
                 continue
-            observations.extend(_changelog_chunk_observations(chunk, source=ref, listing=listing))
-    return tuple(_dedupe_keep_first(observations))
+            # A heading can contain several independent notices.  Keep their
+            # lifecycle language scoped to its own paragraph, then attach only
+            # the nested sections that explicitly belong to this event.
+            parts = [f"{'#' * section.level} {section.title}\n{block}".strip()]
+            if block_index + 1 < len(blocks) and _changelog_adjacent_replacements(
+                blocks[block_index + 1], lifecycle_text=block
+            ):
+                parts.append(blocks[block_index + 1])
+            parts.extend(children)
+            events.append(("\n\n".join(part for part in parts if part), listing))
+    return tuple(events)
 
 
-def _changelog_units(body: str) -> tuple[str, ...]:
-    units = tuple(part.strip() for part in re.split(r"\n\s*\n", body) if part.strip())
-    return units if units else ((body,) if body.strip() else ())
+def _changelog_child_is_relevant(title: str) -> bool:
+    heading = _changelog_heading(title)
+    return heading.startswith(
+        (
+            "affected",
+            "recommended migration",
+            "action required",
+            "required action",
+            "deprecation",
+            "removal",
+            "decommission",
+        )
+    )
 
 
-def _changelog_chunk_observations(
+def _changelog_heading(title: str) -> str:
+    """Normalize a changelog heading without treating Markdown markup as text."""
+    text = title.strip()
+    while True:
+        for marker in ("**", "__", "*", "_"):
+            if text.startswith(marker) and text.endswith(marker) and len(text) > 2 * len(marker):
+                text = text[len(marker) : -len(marker)].strip()
+                break
+        else:
+            return normalize_heading(text)
+
+
+def _changelog_event_observations(
     body: str, *, source: FireworksSourceRef, listing: str
 ) -> tuple[FireworksModelObservation, ...]:
-    ids = _model_ids_from_cell(body, allow_hf=True)
-    if not ids:
-        return ()
-    lowered = body.lower()
-    lifecycle = None
-    retirement = None
-    if "no longer enabled" in lowered:
-        lifecycle = FireworksLifecycle.RETIRED
-        retirement = _first_english_date(body)
-    elif (
-        "no longer be available" in lowered
-        or "decommissioned" in lowered
-        or "deprecated from serverless" in lowered
-        or re.search(r"\bis deprecated\b", lowered)
-    ):
-        lifecycle = FireworksLifecycle.DEPRECATED
-        retirement = _first_english_date(body)
+    lifecycle, retirement = _changelog_lifecycle(body)
     if lifecycle is None:
         return ()
-    replacements = _changelog_replacements(body)
-    deprecated_ids = tuple(item for item in ids if item not in replacements)
+    lifecycle_scope = _changelog_lifecycle_scope(body)
+    target_replacements = _changelog_target_replacements(body)
     observations = [
         FireworksModelObservation(
             provider_model_id=model_id,
             source=source,
             lifecycle=lifecycle,
+            lifecycle_scope=lifecycle_scope,
             deprecation_listing=listing,
             retirement_at=retirement,
-            replacements=tuple(item for item in replacements if item != model_id) or None,
+            replacements=replacements or None,
         )
-        for model_id in deprecated_ids
+        for model_id, replacements in target_replacements
     ]
     return tuple(observations)
 
 
-def _changelog_replacements(body: str) -> tuple[str, ...]:
-    found: list[str] = []
-    for match in re.finditer(r"(?i)migrate to\s+(.+?)(?:\.|$)", body):
-        found.extend(_model_ids_from_cell(match.group(1), allow_hf=True))
-    for match in re.finditer(r"(?i)use\s+`([^`]+)` instead", body):
-        found.extend(_model_ids_from_cell(match.group(1), allow_hf=True))
-    return tuple(dict.fromkeys(found))
+def _changelog_lifecycle_scope(body: str) -> FireworksLifecycleScope:
+    """Classify only the event heading and lifecycle paragraph's applicability."""
+    context = body.split("\n\n", 1)[0].lower()
+    if re.search(
+        r"\b(serverless|dedicated(?:\s+(?:deployment|shape))?|endpoint(?:s)?|router(?:s)?)\b",
+        context,
+    ):
+        return FireworksLifecycleScope.DEPLOYMENT_SCOPED
+    if re.search(
+        r"\b(?:fireworks platform|all deployments|every deployment|globally)\b",
+        context,
+    ):
+        return FireworksLifecycleScope.GLOBAL
+    return FireworksLifecycleScope.AMBIGUOUS
+
+
+def _changelog_lifecycle(body: str) -> tuple[FireworksLifecycle | None, str | None]:
+    lowered = body.lower()
+    if (
+        "no longer enabled" in lowered
+        or re.search(r"\b(?:is|are) no longer available\b", lowered)
+        or re.search(r"\b(?:is|are) (?:removed|retired)\b", lowered)
+    ):
+        return FireworksLifecycle.RETIRED, _first_english_date(body)
+    if (
+        "no longer be available" in lowered
+        or "scheduled for removal" in lowered
+        or re.search(r"\bwill be (?:removed|retired)\b", lowered)
+        or "decommissioned" in lowered
+        or "deprecated from serverless" in lowered
+        or re.search(r"\bis deprecated\b", lowered)
+    ):
+        return FireworksLifecycle.DEPRECATED, _first_english_date(body)
+    return None, None
+
+
+def _changelog_target_replacements(body: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Return lifecycle targets with bullet-local replacement identities.
+
+    A changelog's prose heading is context, never an identity source.  Targets
+    must instead come from a canonical serving ID or a supported Model Library
+    URL in the lifecycle paragraph, an affected-model bullet, or a migration
+    bullet whose direction is explicit.
+    """
+    targets: dict[str, list[str]] = {}
+    for heading, bullet in _changelog_bullets(body):
+        parsed = _changelog_bullet_targets(bullet, heading=heading)
+        for model_id, replacements in parsed:
+            bucket = targets.setdefault(model_id, [])
+            bucket.extend(item for item in replacements if item != model_id)
+
+    pending_targets: tuple[str, ...] = ()
+    pending_lifecycle_text: str | None = None
+    for unit in re.split(r"\n\s*\n", body):
+        if _CHANGELOG_BULLET.match(unit):
+            pending_targets = ()
+            pending_lifecycle_text = None
+            continue
+        if _changelog_lifecycle(unit)[0] is not None:
+            parsed = _changelog_bullet_targets(unit, heading=None)
+            pending_targets = tuple(model_id for model_id, _replacements in parsed)
+            pending_lifecycle_text = unit
+            for model_id, replacements in parsed:
+                bucket = targets.setdefault(model_id, [])
+                bucket.extend(item for item in replacements if item != model_id)
+            continue
+        if len(pending_targets) == 1:
+            replacements = _changelog_adjacent_replacements(
+                unit, lifecycle_text=pending_lifecycle_text
+            )
+            if replacements:
+                bucket = targets.setdefault(pending_targets[0], [])
+                bucket.extend(item for item in replacements if item != pending_targets[0])
+        # Guidance is adjacent only: any paragraph that was not the immediate
+        # lifecycle statement or its guidance ends the association.
+        pending_targets = ()
+        pending_lifecycle_text = None
+
+    return tuple(
+        (model_id, tuple(dict.fromkeys(replacements))) for model_id, replacements in targets.items()
+    )
+
+
+def _changelog_adjacent_replacements(
+    text: str, *, lifecycle_text: str | None = None
+) -> tuple[str, ...]:
+    """Read explicit replacement IDs from one adjacent migration paragraph."""
+    if text.lstrip().startswith("#"):
+        return ()
+    migration = re.search(r"(?i)\bmigrate to\b", text)
+    workload_migration = _changelog_workload_migration(text, lifecycle_text=lifecycle_text)
+    use = re.search(r"(?i)\buse\b", text)
+    marker = migration or workload_migration or use
+    if marker is None:
+        return ()
+    if (
+        migration is None
+        and workload_migration is None
+        and re.search(r"(?i)\b(?:migration|replacement)\b", text) is None
+    ):
+        return ()
+    return tuple(
+        dict.fromkeys(
+            model_id
+            for start, model_id in _changelog_identity_mentions(text)
+            if start >= marker.end()
+        )
+    )
+
+
+def _changelog_workload_migration(text: str, *, lifecycle_text: str | None) -> re.Match[str] | None:
+    """Match explicit scoped migration guidance only within the lifecycle scope."""
+    if lifecycle_text is None:
+        return None
+    match = re.search(r"(?i)\bmigrate\s+([^\n.]{1,120}?)\s+to\b", text)
+    if match is None:
+        return None
+    workload_scope = _changelog_scope_terms(match.group(1))
+    lifecycle_scope = _changelog_scope_terms(lifecycle_text)
+    if not workload_scope or not lifecycle_scope or not workload_scope & lifecycle_scope:
+        return None
+    return match
+
+
+def _changelog_scope_terms(text: str) -> frozenset[str]:
+    """Return only explicit deployment/workload terms, never model identities."""
+    terms = re.findall(
+        r"(?i)\b(serverless|training|inference|dedicated|managed|deployment(?:s)?|endpoint(?:s)?)\b",
+        text,
+    )
+    normalized = {"deployments": "deployment", "endpoints": "endpoint"}
+    return frozenset(normalized.get(term.lower(), term.lower()) for term in terms)
+
+
+def _changelog_bullets(body: str) -> tuple[tuple[str | None, str], ...]:
+    matches = list(_CHANGELOG_BULLET.finditer(body))
+    bullets: list[tuple[str | None, str]] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
+        prefix = body[: match.start()]
+        headings = re.findall(r"(?m)^#+\s+(.+)$", prefix)
+        bullets.append((headings[-1] if headings else None, body[match.end() : end].strip()))
+    return tuple(bullets)
+
+
+def _changelog_bullet_targets(
+    text: str, *, heading: str | None
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    lowered = text.lower()
+    if "not affected" in lowered or "remain available" in lowered:
+        return ()
+    mentions = _changelog_identity_mentions(text)
+    if not mentions:
+        return ()
+
+    migration = re.search(r"(?i)\bmigrate from\b.+?\bto\b", text, flags=re.DOTALL)
+    migrate_to = re.search(r"(?i)\bmigrate to\b", text)
+    use = re.search(r"(?i)\buse\b", text)
+    split_at: int | None = None
+    if migration is not None:
+        split_at = migration.end() - len("to")
+    elif migrate_to is not None:
+        split_at = migrate_to.start()
+    elif use is not None and _changelog_lifecycle(text)[0] is not None:
+        split_at = use.start()
+
+    if split_at is not None:
+        affected = tuple(model_id for start, model_id in mentions if start < split_at)
+        replacements = tuple(model_id for start, model_id in mentions if start >= split_at)
+        if not affected or not replacements:
+            return ()
+        return tuple(
+            (model_id, tuple(item for item in replacements if item != model_id))
+            for model_id in dict.fromkeys(affected)
+            if any(item != model_id for item in replacements)
+        )
+
+    normalized_heading = _changelog_heading(heading or "")
+    if normalized_heading.startswith("affected"):
+        return tuple((model_id, ()) for _start, model_id in mentions)
+    if _changelog_lifecycle(text)[0] is not None and len(mentions) == 1:
+        return ((mentions[0][1], ()),)
+    return ()
+
+
+def _changelog_model_ids(body: str) -> tuple[str, ...]:
+    """Return explicit IDs and strict Fireworks Model Library link targets.
+
+    Only the documented ``/models/fireworks/<slug>`` namespace maps directly
+    to the existing canonical ``accounts/fireworks/models/<slug>`` identity.
+    Display names and all other links remain non-identities.
+    """
+    return tuple(dict.fromkeys(model_id for _start, model_id in _changelog_identity_mentions(body)))
+
+
+def _changelog_identity_mentions(body: str) -> tuple[tuple[int, str], ...]:
+    """Return ordered changelog identity mentions with strict provenance."""
+    found: list[tuple[int, str]] = []
+    for match in _CHANGELOG_CANONICAL_ID.finditer(body):
+        candidate = match.group(1)
+        if _require_model_id(candidate, allow_hf=False) is not None:
+            found.append((match.start(1), candidate))
+    for match in _LINK.finditer(body):
+        destination = match.group(2)
+        parsed = urlparse(destination.strip())
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc.lower() != "app.fireworks.ai"
+            or parsed.query
+            or parsed.fragment
+        ):
+            continue
+        parts = parsed.path.split("/")
+        if len(parts) != 4 or parts[:3] != ["", "models", "fireworks"]:
+            continue
+        candidate = f"accounts/fireworks/models/{parts[3]}"
+        if _RESOURCE_ID.fullmatch(candidate):
+            found.append((match.start(2), candidate))
+    return tuple(sorted(dict.fromkeys(found), key=lambda item: item[0]))
 
 
 def _parse_inference_guide(
@@ -518,6 +823,30 @@ def _dedupe_keep_first(
     unique: list[FireworksModelObservation] = []
     for item in observations:
         key = (item.provider_model_id, item.source.source_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return tuple(unique)
+
+
+def _dedupe_changelog_events(
+    observations: Sequence[FireworksModelObservation],
+) -> tuple[FireworksModelObservation, ...]:
+    """Keep distinct changelog events for later global-evidence selection."""
+    seen: set[tuple[object, ...]] = set()
+    unique: list[FireworksModelObservation] = []
+    for item in observations:
+        key = (
+            item.provider_model_id,
+            item.source.source_id,
+            item.deprecation_listing,
+            item.lifecycle_scope,
+            item.lifecycle,
+            item.deprecated_at,
+            item.retirement_at,
+            item.replacements,
+        )
         if key in seen:
             continue
         seen.add(key)

@@ -23,6 +23,14 @@ class FireworksLifecycle(StrEnum):
     RETIRED = "retired"
 
 
+class FireworksLifecycleScope(StrEnum):
+    """Whether changelog lifecycle wording applies to the whole model."""
+
+    GLOBAL = "global"
+    DEPLOYMENT_SCOPED = "deployment_scoped"
+    AMBIGUOUS = "ambiguous"
+
+
 @dataclass(frozen=True, slots=True)
 class FireworksSourceRef:
     """Provenance fields copied from a captured source. No generated UUIDs."""
@@ -59,6 +67,7 @@ class FireworksModelObservation:
     resolves_to: str | None = None
     family: str | None = None
     lifecycle: FireworksLifecycle | None = None
+    lifecycle_scope: FireworksLifecycleScope | None = None
     deprecation_listing: str | None = None
     deprecated_at: str | None = None
     retirement_at: str | None = None
@@ -84,6 +93,10 @@ class FireworksModelObservation:
                 "Fireworks alias observation must declare identity_kind=alias "
                 "when resolves_to is set"
             )
+        if self.lifecycle_scope is not None and not isinstance(
+            self.lifecycle_scope, FireworksLifecycleScope
+        ):
+            raise FireworksParseError("Fireworks lifecycle scope is not recognized")
         if (
             self.deprecated_at is not None
             and self.retirement_at is not None

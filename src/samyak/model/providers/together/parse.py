@@ -91,6 +91,20 @@ _LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _REPLACEMENT = re.compile(
     r"(?i)recommended replacement:\s*`([^`]+)`",
 )
+# A changelog entry's trailing bold date, for example "**July 28, 2026**".
+# It dates the entry. It is not a labelled removal date.
+_CHANGELOG_DATELINE = re.compile(
+    r"^\*\*(?P<month>January|February|March|April|May|June|July|August|"
+    r"September|October|November|December)\s+(?P<day>\d{1,2}),?\s+(?P<year>\d{4})\*\*$",
+    re.IGNORECASE,
+)
+_REMOVAL_LANGUAGE = re.compile(r"\b(?:remov(?:e|ed|al)|retir(?:e|ed|ement))\b", re.IGNORECASE)
+# "will no longer be available ... after/on [date]" is a scheduled end date.
+# It is not the immediate "no longer available" retirement wording.
+_SCHEDULED_END_OF_AVAILABILITY = re.compile(
+    r"will no longer be available\b.{0,200}?\b(?:after|on)\b",
+    re.IGNORECASE,
+)
 _AMOUNT = r"(?P<num>\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(?P<unit>[kKmM])?"
 _PRIMARY_MODEL_ID = re.compile(
     r"(?i)(?:the\s+model\s+id\s+is|model\s+(?:id|string)(?:\s+for\s+api)?\s*(?:is|:))\s*`([^`]+)`"
@@ -446,7 +460,10 @@ def _changelog_deprecation_observations(
 ) -> tuple[TogetherModelObservation, ...]:
     lowered = body.lower()
     retired = "no longer available" in lowered
-    retirement = _first_english_date(body) or _first_iso_date(body)
+    section_dates = _explicit_removal_dates(body)
+    # One explicit removal date introduces the whole list. Several dates, or
+    # only an unlabeled trailing dateline, do not attach to every bullet.
+    section_retirement = section_dates[0] if len(section_dates) == 1 else None
     observations: list[TogetherModelObservation] = []
     for raw_line in body.split("\n"):
         line = raw_line.strip()
@@ -459,6 +476,13 @@ def _changelog_deprecation_observations(
         match = _REPLACEMENT.search(line)
         if match is not None:
             replacement = _require_model_id(match.group(1))
+        line_dates = _explicit_removal_dates(line)
+        if len(line_dates) == 1:
+            retirement = line_dates[0]
+        elif line_dates:
+            retirement = None
+        else:
+            retirement = section_retirement
         observations.append(
             TogetherModelObservation(
                 provider_model_id=model_id,
@@ -541,18 +565,67 @@ def _parse_model_page(source: CapturedSource) -> tuple[TogetherModelObservation,
     ref = _source_ref(source)
     body = _unwrap_markdown_emphasis(source.body)
     model_id = _model_page_primary_id(body)
-    if model_id is None:
+    if model_id is not None:
+        return (
+            TogetherModelObservation(
+                provider_model_id=model_id,
+                source=ref,
+                context_window_tokens=_first_token_match(body, _CONTEXT_WINDOW, _CONTEXT_LENGTH),
+                max_input_tokens=_first_token_match(body, _INPUT_CAP),
+                max_output_tokens=_first_token_match(body, _OUTPUT_UP_TO, _OUTPUT_CAP),
+                api_access=True,
+            ),
+        )
+    observations = _model_page_table_observations(body, source=ref)
+    if not observations:
         raise TogetherParseError("Together model page is missing a serving model id")
-    return (
-        TogetherModelObservation(
-            provider_model_id=model_id,
-            source=ref,
-            context_window_tokens=_first_token_match(body, _CONTEXT_WINDOW, _CONTEXT_LENGTH),
-            max_input_tokens=_first_token_match(body, _INPUT_CAP),
-            max_output_tokens=_first_token_match(body, _OUTPUT_UP_TO, _OUTPUT_CAP),
-            api_access=True,
-        ),
-    )
+    return observations
+
+
+def _model_page_table_observations(
+    body: str, *, source: TogetherSourceRef
+) -> tuple[TogetherModelObservation, ...]:
+    """Read serving ids from a Model ID column.
+
+    Each id comes from that cell only. A Model cell on the same row is the
+    display name. Price columns are not token limits, and a shared prose size
+    is not copied onto every row.
+    """
+    observations: list[TogetherModelObservation] = []
+    for table in pipe_tables(_without_fenced_code(body)):
+        if not table:
+            continue
+        columns = {_header_key(key): key for key in table[0]}
+        id_header = columns.get("model id")
+        if id_header is None:
+            continue
+        name_header = columns.get("model")
+        for row in table:
+            model_id = _first_model_id(row.get(id_header, ""))
+            if model_id is None:
+                continue
+            display = _visible_text(row.get(name_header, "")) if name_header else ""
+            observations.append(
+                TogetherModelObservation(
+                    provider_model_id=model_id,
+                    source=source,
+                    display_name=display or None,
+                    api_access=True,
+                )
+            )
+    return tuple(observations)
+
+
+def _without_fenced_code(body: str) -> str:
+    lines: list[str] = []
+    fenced = False
+    for line in body.split("\n"):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+            continue
+        if not fenced:
+            lines.append(line)
+    return "\n".join(lines)
 
 
 def _unwrap_markdown_emphasis(body: str) -> str:
@@ -587,20 +660,47 @@ def _parse_iso_date(raw: str) -> str | None:
         return None
 
 
-def _first_iso_date(text: str) -> str | None:
-    match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text)
-    if match is None:
-        return None
-    try:
-        return date.fromisoformat(match.group(1)).isoformat()
-    except ValueError:
-        return None
+def _is_changelog_dateline(line: str) -> bool:
+    return _CHANGELOG_DATELINE.fullmatch(line.strip()) is not None
 
 
-def _first_english_date(text: str) -> str | None:
-    match = _ENGLISH_DATE.search(text)
-    if match is None:
-        return None
+def _line_states_explicit_end(line: str) -> bool:
+    return (
+        _REMOVAL_LANGUAGE.search(line) is not None
+        or _SCHEDULED_END_OF_AVAILABILITY.search(line) is not None
+    )
+
+
+def _explicit_removal_dates(text: str) -> tuple[str, ...]:
+    """Return end dates a line states explicitly.
+
+    A date counts when the line calls it removal, retirement, or the end of
+    availability ("will no longer be available ... after/on [date]"). A trailing
+    bold dateline does not. Distinct dates keep source order so the caller can
+    see when the association is ambiguous.
+    """
+    found: list[str] = []
+    for raw_line in text.split("\n"):
+        line = raw_line.strip()
+        if not line or _is_changelog_dateline(line):
+            continue
+        if not _line_states_explicit_end(line):
+            continue
+        for match in _ENGLISH_DATE.finditer(line):
+            iso = _iso_from_english_match(match)
+            if iso is not None and iso not in found:
+                found.append(iso)
+        for match in re.finditer(r"\b(\d{4}-\d{2}-\d{2})\b", line):
+            try:
+                iso = date.fromisoformat(match.group(1)).isoformat()
+            except ValueError:
+                continue
+            if iso not in found:
+                found.append(iso)
+    return tuple(found)
+
+
+def _iso_from_english_match(match: re.Match[str]) -> str | None:
     month = _MONTHS.get(match.group("month").lower())
     if month is None:
         return None

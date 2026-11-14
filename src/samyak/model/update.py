@@ -6,7 +6,7 @@ Internal orchestration. Not part of the public Samyak API.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from samyak.model.catalog import (
@@ -21,12 +21,10 @@ from samyak.model.errors import (
     CatalogStoreError,
     CatalogValidationError,
     HistorySchemaError,
-    HistoryStoreError,
     ModelCatalogError,
 )
 from samyak.model.facts import FactStatus
 from samyak.model.history import history_events_from_changes
-from samyak.model.history_store import FileLifecycleHistoryStore
 from samyak.model.http import Clock, HttpTransport
 from samyak.model.lifecycle import LifecycleChange, diff_provider_lifecycle
 from samyak.model.providers.anthropic.fetch import (
@@ -50,8 +48,20 @@ from samyak.model.providers.together.fetch import (
     refresh_together_catalog,
     together_https_transport,
 )
-from samyak.model.records import RECORD_FACT_NAMES, ModelRecord, derived_observed_sources
+from samyak.model.records import (
+    RECORD_FACT_NAMES,
+    EvidenceDisposition,
+    ModelRecord,
+    derived_observed_sources,
+)
+from samyak.model.source_archive import (
+    DEFAULT_ARCHIVE_KEEP,
+    SourceArchive,
+    close_source_archive,
+    open_source_archive,
+)
 from samyak.model.store import FileCatalogStore
+from samyak.model.transaction import CatalogHistoryTransaction, CatalogHistoryTransactionError
 
 PROVIDER_OPENAI = "openai"
 PROVIDER_ANTHROPIC = "anthropic"
@@ -73,10 +83,20 @@ HISTORY_WRITE_FAILED_SUMMARY = "lifecycle history could not be written."
 HISTORY_WRITE_FAILED_DETAIL = (
     "The model catalog was updated, but lifecycle changes were not persisted to history."
 )
-_HISTORY_WRITE_FAILED_NOTICE = CatalogNotice(
-    code=HISTORY_WRITE_FAILED_CODE,
-    message=f"{HISTORY_WRITE_FAILED_SUMMARY} {HISTORY_WRITE_FAILED_DETAIL}",
-)
+
+
+def is_history_write_failure_code(code: str) -> bool:
+    """True for a durable marker that history for one catalog update was not saved."""
+    return code == HISTORY_WRITE_FAILED_CODE or code.startswith(f"{HISTORY_WRITE_FAILED_CODE}:")
+
+
+def history_write_failure_code(provider_id: str, observed_at: str) -> str:
+    """Identify the provider update whose lifecycle events were not appended.
+
+    The timestamp may contain colons. The provider is the single field between
+    the prefix and the first following colon.
+    """
+    return f"{HISTORY_WRITE_FAILED_CODE}:{provider_id}:{observed_at}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,9 +111,11 @@ class CatalogUpdateResult:
     overlay against the incoming refresh. It is not catalog schema and is not
     written to ``catalog.json``.
 
-    ``notices`` is the catalog notices plus, when history persistence fails
-    after a successful catalog commit, an operational ``HISTORY_WRITE_FAILED``
-    notice. That operational notice is not written to ``catalog.json``.
+    ``notices`` includes a ``HISTORY_WRITE_FAILED:<provider>:<observed_at>``
+    marker when history persistence fails after a successful catalog commit.
+    The marker is stored on the catalog. A later history append, including
+    another provider in the same ``update all``, does not remove it. The
+    omitted events are not retained and are not reconstructed.
     """
 
     provider_id: str
@@ -146,6 +168,10 @@ def update_openai_catalog(
     transport: HttpTransport | None = None,
     store: FileCatalogStore | None = None,
     clock: Clock | None = None,
+    archive: SourceArchive | None = None,
+    archive_sources: bool = False,
+    archive_keep: int = DEFAULT_ARCHIVE_KEEP,
+    finalize_archive: bool = True,
 ) -> CatalogUpdateResult:
     """Fetch official OpenAI docs and merge them into the local overlay on success."""
     return update_provider_catalog(
@@ -153,6 +179,10 @@ def update_openai_catalog(
         transport=transport,
         store=store,
         clock=clock,
+        archive=archive,
+        archive_sources=archive_sources,
+        archive_keep=archive_keep,
+        finalize_archive=finalize_archive,
     )
 
 
@@ -161,6 +191,10 @@ def update_anthropic_catalog(
     transport: HttpTransport | None = None,
     store: FileCatalogStore | None = None,
     clock: Clock | None = None,
+    archive: SourceArchive | None = None,
+    archive_sources: bool = False,
+    archive_keep: int = DEFAULT_ARCHIVE_KEEP,
+    finalize_archive: bool = True,
 ) -> CatalogUpdateResult:
     """Fetch official Anthropic docs and merge them into the local overlay on success."""
     return update_provider_catalog(
@@ -168,6 +202,10 @@ def update_anthropic_catalog(
         transport=transport,
         store=store,
         clock=clock,
+        archive=archive,
+        archive_sources=archive_sources,
+        archive_keep=archive_keep,
+        finalize_archive=finalize_archive,
     )
 
 
@@ -176,6 +214,10 @@ def update_google_catalog(
     transport: HttpTransport | None = None,
     store: FileCatalogStore | None = None,
     clock: Clock | None = None,
+    archive: SourceArchive | None = None,
+    archive_sources: bool = False,
+    archive_keep: int = DEFAULT_ARCHIVE_KEEP,
+    finalize_archive: bool = True,
 ) -> CatalogUpdateResult:
     """Fetch official Gemini API docs and merge them into the local overlay on success."""
     return update_provider_catalog(
@@ -183,6 +225,10 @@ def update_google_catalog(
         transport=transport,
         store=store,
         clock=clock,
+        archive=archive,
+        archive_sources=archive_sources,
+        archive_keep=archive_keep,
+        finalize_archive=finalize_archive,
     )
 
 
@@ -191,6 +237,10 @@ def update_fireworks_catalog(
     transport: HttpTransport | None = None,
     store: FileCatalogStore | None = None,
     clock: Clock | None = None,
+    archive: SourceArchive | None = None,
+    archive_sources: bool = False,
+    archive_keep: int = DEFAULT_ARCHIVE_KEEP,
+    finalize_archive: bool = True,
 ) -> CatalogUpdateResult:
     """Fetch official Fireworks docs and merge them into the local overlay on success."""
     return update_provider_catalog(
@@ -198,6 +248,10 @@ def update_fireworks_catalog(
         transport=transport,
         store=store,
         clock=clock,
+        archive=archive,
+        archive_sources=archive_sources,
+        archive_keep=archive_keep,
+        finalize_archive=finalize_archive,
     )
 
 
@@ -206,6 +260,10 @@ def update_together_catalog(
     transport: HttpTransport | None = None,
     store: FileCatalogStore | None = None,
     clock: Clock | None = None,
+    archive: SourceArchive | None = None,
+    archive_sources: bool = False,
+    archive_keep: int = DEFAULT_ARCHIVE_KEEP,
+    finalize_archive: bool = True,
 ) -> CatalogUpdateResult:
     """Fetch official Together docs and merge them into the local overlay on success."""
     return update_provider_catalog(
@@ -213,6 +271,10 @@ def update_together_catalog(
         transport=transport,
         store=store,
         clock=clock,
+        archive=archive,
+        archive_sources=archive_sources,
+        archive_keep=archive_keep,
+        finalize_archive=finalize_archive,
     )
 
 
@@ -221,6 +283,8 @@ def update_all_catalogs(
     store: FileCatalogStore | None = None,
     clock: Clock | None = None,
     progress: UpdateAllProgress | None = None,
+    archive_sources: bool = False,
+    archive_keep: int = DEFAULT_ARCHIVE_KEEP,
 ) -> tuple[CatalogUpdateResult, ...]:
     """Refresh every supported provider sequentially using the same update path.
 
@@ -228,43 +292,67 @@ def update_all_catalogs(
     skip the remaining providers and does not write an empty replacement for
     that provider. This function does not persist a separate all-update record.
     ``progress`` is a CLI hook only and does not change catalog or history
-    semantics.
+    semantics. ``archive_sources`` writes a local diagnostic generation under
+    the model cache and does not change catalog bytes, history, or publication.
+    One command shares one refresh generation across providers. A provider
+    failure leaves the other providers' archived sources in that generation.
+
+    The clock is read once before the first provider. That stamp is
+    ``generated_at``, the ``verified_at`` of facts fetched in this run, and
+    the ``observed_at`` of history events from this run. Source
+    ``retrieved_at`` still comes from the clock at each GET. A provider that
+    does not commit keeps its existing facts and provenance. Records retained
+    after an optional-source failure are not re-stamped. ``freshness.status``
+    remains the adapter's as-of label and does not claim those older facts
+    were verified at this stamp.
     """
     store = store or FileCatalogStore()
     clock_fn = clock or utc_now_iso
+    shared_stamp = clock_fn()
+    archive = (
+        open_source_archive(store.models_dir, refresh_stamp=shared_stamp, keep=archive_keep)
+        if archive_sources
+        else None
+    )
     total = len(SUPPORTED_PROVIDERS)
     results: list[CatalogUpdateResult] = []
-    for index, provider_id in enumerate(SUPPORTED_PROVIDERS, start=1):
-        if progress is not None:
-            progress("start", provider_id, index, total, None)
-        transport = None
-        if progress is not None:
-            report = progress
+    try:
+        for index, provider_id in enumerate(SUPPORTED_PROVIDERS, start=1):
+            if progress is not None:
+                progress("start", provider_id, index, total, None)
+            transport = None
+            if progress is not None:
+                report = progress
 
-            def on_request(
-                event_provider: str = provider_id,
-                event_index: int = index,
-                emit: UpdateAllProgress = report,
-            ) -> None:
-                emit("request", event_provider, event_index, total, None)
+                def on_request(
+                    event_provider: str = provider_id,
+                    event_index: int = index,
+                    emit: UpdateAllProgress = report,
+                ) -> None:
+                    emit("request", event_provider, event_index, total, None)
 
-            transport = _ProgressHttpTransport(
-                _default_transport(provider_id, clock_fn),
-                on_request,
-            )
-        try:
-            result = update_provider_catalog(
-                provider_id,
-                transport=transport,
-                store=store,
-                clock=clock,
-            )
-        except OSError as exc:
-            result = _failed(provider_id, store, store.exists(), str(exc))
-        results.append(result)
-        if progress is not None:
-            progress("finish", provider_id, index, total, result)
-    return tuple(results)
+                transport = _ProgressHttpTransport(
+                    _default_transport(provider_id, clock_fn),
+                    on_request,
+                )
+            try:
+                result = update_provider_catalog(
+                    provider_id,
+                    transport=transport,
+                    store=store,
+                    clock=clock_fn,
+                    stamp=shared_stamp,
+                    archive=archive,
+                    finalize_archive=False,
+                )
+            except OSError as exc:
+                result = _failed(provider_id, store, store.exists(), str(exc))
+            results.append(result)
+            if progress is not None:
+                progress("finish", provider_id, index, total, result)
+        return tuple(results)
+    finally:
+        close_source_archive(archive)
 
 
 def update_provider_catalog(
@@ -273,78 +361,117 @@ def update_provider_catalog(
     transport: HttpTransport | None = None,
     store: FileCatalogStore | None = None,
     clock: Clock | None = None,
+    stamp: str | None = None,
+    archive: SourceArchive | None = None,
+    archive_sources: bool = False,
+    archive_keep: int = DEFAULT_ARCHIVE_KEEP,
+    finalize_archive: bool = True,
 ) -> CatalogUpdateResult:
     """Replace one provider's records in the overlay. Other providers are kept.
 
     Required source failures do not write. An existing live catalog that
     cannot be loaded is not treated as missing: the file is left unchanged.
     Best-effort model-page failures still commit a catalog that includes
-    notices. Timestamps are taken from ``clock`` (or now) and passed into
-    refresh; parsers do not invent them.
+    notices. ``stamp``, when set, is the verification time for facts fetched
+    in this refresh, for catalog ``generated_at``, and for history
+    ``observed_at``. A single-provider command omits it and reads ``clock``
+    once instead. Source retrieval still uses ``clock`` at each GET. Records
+    retained after an optional-source failure keep their existing provenance.
+    ``archive`` or ``archive_sources`` records captured documents outside the
+    catalog. Archive errors do not roll back a commit and do not add a notice.
     """
     store = store or FileCatalogStore()
     clock_fn = clock or utc_now_iso
-    stamp = clock_fn()
-    previous_existed = store.exists()
-    previous, load_error = _load_previous_if_present(store, previous_existed)
-    if load_error is not None:
-        return _failed(provider_id, store, previous_existed, load_error)
-    if transport is None:
-        transport = _default_transport(provider_id, clock_fn)
+    resolved_stamp = clock_fn() if stamp is None else stamp
+    created_archive = False
+    active_archive = archive
     try:
-        refresh = _refresh_provider(
+        if active_archive is None and archive_sources:
+            active_archive = open_source_archive(
+                store.models_dir,
+                refresh_stamp=resolved_stamp,
+                keep=archive_keep,
+            )
+            created_archive = True
+        return _commit_provider_catalog(
             provider_id,
-            transport,
-            generated_at=stamp,
-            verified_at=stamp,
+            transport=transport,
+            store=store,
+            clock_fn=clock_fn,
+            resolved_stamp=resolved_stamp,
+            diagnostics=active_archive,
         )
-    except ModelCatalogError as exc:
-        return _failed(provider_id, store, previous_existed, str(exc))
-    if not refresh.ok or refresh.catalog is None:
-        return _failed(
-            provider_id,
-            store,
-            previous_existed,
-            refresh.error or f"{provider_id} catalog refresh failed",
-        )
-    incoming = _retain_records_for_failed_sources(
-        previous,
-        refresh.catalog,
-        provider_id=provider_id,
-        notices=refresh.notices,
-    )
-    lifecycle_changes = diff_provider_lifecycle(
-        previous,
-        incoming,
-        provider_id=provider_id,
-    )
-    merged = merge_provider_refresh(previous, incoming, provider_id=provider_id)
+    finally:
+        if created_archive and finalize_archive:
+            close_source_archive(active_archive)
+
+
+def _commit_provider_catalog(
+    provider_id: str,
+    *,
+    transport: HttpTransport | None,
+    store: FileCatalogStore,
+    clock_fn: Clock,
+    resolved_stamp: str,
+    diagnostics: SourceArchive | None,
+) -> CatalogUpdateResult:
     try:
-        store.save(merged)
-    except CatalogStoreError as exc:
-        return _failed(provider_id, store, previous_existed, str(exc), notices=refresh.notices)
-    except OSError:
-        return _failed(
-            provider_id,
-            store,
-            previous_existed,
-            "model catalog could not be written",
-            notices=refresh.notices,
-        )
-    # History is an observation log. A sidecar write failure must not roll back
-    # the already committed catalog, which remains current-state truth.
-    notices = merged.notices
-    if lifecycle_changes:
-        try:
-            FileLifecycleHistoryStore(root=store.root).append(
-                history_events_from_changes(
+        with CatalogHistoryTransaction(store.root) as transaction:
+            previous, history = transaction.load_pair()
+            previous_existed = previous is not None
+            if transport is None:
+                transport = _default_transport(provider_id, clock_fn)
+            try:
+                refresh = _refresh_provider(
+                    provider_id,
+                    transport,
+                    generated_at=resolved_stamp,
+                    verified_at=resolved_stamp,
+                    diagnostics=diagnostics,
+                )
+            except ModelCatalogError as exc:
+                return _failed(provider_id, store, previous_existed, str(exc))
+            if not refresh.ok or refresh.catalog is None:
+                return _failed(
+                    provider_id,
+                    store,
+                    previous_existed,
+                    refresh.error or f"{provider_id} catalog refresh failed",
+                )
+            incoming = _retain_records_for_failed_sources(
+                previous,
+                refresh.catalog,
+                provider_id=provider_id,
+                notices=refresh.notices,
+            )
+            if provider_id == PROVIDER_FIREWORKS:
+                incoming = _retain_absent_fireworks_records(
+                    previous,
+                    incoming,
+                    capture_complete=not refresh.partial,
+                )
+            lifecycle_changes = diff_provider_lifecycle(
+                previous,
+                incoming,
+                provider_id=provider_id,
+            )
+            merged = merge_provider_refresh(previous, incoming, provider_id=provider_id)
+            try:
+                events = history_events_from_changes(
                     lifecycle_changes,
                     provider_id=provider_id,
-                    observed_at=stamp,
+                    observed_at=resolved_stamp,
                 )
+            except (CatalogValidationError, HistorySchemaError) as exc:
+                return _failed(
+                    provider_id, store, previous_existed, str(exc), notices=refresh.notices
+                )
+            transaction.commit(
+                merged,
+                type(history)(events=history.events + events),
             )
-        except (HistoryStoreError, HistorySchemaError, CatalogValidationError):
-            notices = notices + (_HISTORY_WRITE_FAILED_NOTICE,)
+    except CatalogHistoryTransactionError as exc:
+        return _failed(provider_id, store, store.exists(), str(exc))
     return CatalogUpdateResult(
         provider_id=provider_id,
         ok=True,
@@ -354,9 +481,59 @@ def update_provider_catalog(
         catalog_path=store.catalog_path,
         previous_existed=previous_existed,
         error=None,
-        notices=notices,
+        notices=merged.notices,
         lifecycle_changes=lifecycle_changes,
     )
+
+
+def _catalog_with_notices(
+    catalog: ModelCatalog, notices: tuple[CatalogNotice, ...]
+) -> ModelCatalog:
+    if catalog.notices == notices:
+        return catalog
+    return build_catalog(
+        models=catalog.models,
+        generated_at=catalog.generated_at,
+        freshness=catalog.freshness,
+        notices=notices,
+        version=catalog.version,
+    )
+
+
+def _save_catalog_notices(store: FileCatalogStore, catalog: ModelCatalog) -> ModelCatalog | None:
+    """Persist a notice-only catalog rewrite. Model records are already committed."""
+    try:
+        store.save(catalog)
+    except (CatalogStoreError, OSError):
+        return None
+    return catalog
+
+
+def _record_history_write_failure(
+    store: FileCatalogStore,
+    catalog: ModelCatalog,
+    *,
+    provider_id: str,
+    observed_at: str,
+) -> tuple[ModelCatalog, tuple[CatalogNotice, ...]]:
+    """Persist the failed update. Do not drop markers left by other updates."""
+    code = history_write_failure_code(provider_id, observed_at)
+    notices = catalog.notices
+    if not any(notice.code == code for notice in notices):
+        notices = notices + (
+            CatalogNotice(
+                code=code,
+                message=(
+                    f"{HISTORY_WRITE_FAILED_SUMMARY} {HISTORY_WRITE_FAILED_DETAIL} "
+                    f"The unresolved update is {provider_id} at {observed_at}."
+                ),
+            ),
+        )
+    updated = _catalog_with_notices(catalog, notices)
+    saved = _save_catalog_notices(store, updated)
+    if saved is None:
+        return catalog, notices
+    return saved, saved.notices
 
 
 def merge_provider_refresh(
@@ -447,6 +624,49 @@ def _retain_records_for_failed_sources(
     )
 
 
+def _retain_absent_fireworks_records(
+    previous: ModelCatalog | None,
+    incoming: ModelCatalog,
+    *,
+    capture_complete: bool,
+) -> ModelCatalog:
+    """Retain Fireworks identities omitted by a later capture.
+
+    The documented Fireworks subset has no authoritative deletion feed. A
+    complete capture can therefore establish only that a former identity was
+    not observed, never that it was retired or replaced. A partial capture is
+    weaker still and leaves the previous disposition unchanged.
+    """
+    if previous is None:
+        return incoming
+    incoming_ids = {
+        item.samyak_id for item in incoming.models if item.provider_id == PROVIDER_FIREWORKS
+    }
+    retained: list[ModelRecord] = []
+    for record in previous.models:
+        if record.provider_id != PROVIDER_FIREWORKS or record.samyak_id in incoming_ids:
+            continue
+        retained.append(
+            replace(
+                record,
+                evidence_disposition=(
+                    EvidenceDisposition.NOT_OBSERVED_IN_CURRENT_CAPTURE
+                    if capture_complete
+                    else record.evidence_disposition
+                ),
+            )
+        )
+    if not retained:
+        return incoming
+    return build_catalog(
+        models=incoming.models + tuple(retained),
+        generated_at=incoming.generated_at,
+        freshness=incoming.freshness,
+        notices=incoming.notices,
+        version=incoming.version,
+    )
+
+
 def _presence_depends_on_failed_sources(record: ModelRecord, failed: frozenset[str]) -> bool:
     """True when continued presence cannot be confirmed without a failed source."""
     presence = _presence_source_ids(record)
@@ -478,6 +698,7 @@ def _refresh_provider(
     *,
     generated_at: str,
     verified_at: str,
+    diagnostics: SourceArchive | None = None,
 ):
     if provider_id == PROVIDER_OPENAI:
         return refresh_openai_catalog(
@@ -485,6 +706,7 @@ def _refresh_provider(
             generated_at=generated_at,
             verified_at=verified_at,
             overlay=CatalogOverlay.USER_CACHE,
+            diagnostics=diagnostics,
         )
     if provider_id == PROVIDER_ANTHROPIC:
         return refresh_anthropic_catalog(
@@ -492,6 +714,7 @@ def _refresh_provider(
             generated_at=generated_at,
             verified_at=verified_at,
             overlay=CatalogOverlay.USER_CACHE,
+            diagnostics=diagnostics,
         )
     if provider_id == PROVIDER_GOOGLE:
         return refresh_google_catalog(
@@ -499,6 +722,7 @@ def _refresh_provider(
             generated_at=generated_at,
             verified_at=verified_at,
             overlay=CatalogOverlay.USER_CACHE,
+            diagnostics=diagnostics,
         )
     if provider_id == PROVIDER_FIREWORKS:
         return refresh_fireworks_catalog(
@@ -506,6 +730,7 @@ def _refresh_provider(
             generated_at=generated_at,
             verified_at=verified_at,
             overlay=CatalogOverlay.USER_CACHE,
+            diagnostics=diagnostics,
         )
     if provider_id == PROVIDER_TOGETHER:
         return refresh_together_catalog(
@@ -513,6 +738,7 @@ def _refresh_provider(
             generated_at=generated_at,
             verified_at=verified_at,
             overlay=CatalogOverlay.USER_CACHE,
+            diagnostics=diagnostics,
         )
     raise ModelCatalogError(f"unknown provider {provider_id!r}")
 
@@ -555,7 +781,12 @@ def _notice_provider(code: str) -> str | None:
     OpenAI's original unprefixed ``PARTIAL_MODEL_PAGES`` code is preserved.
     Newer notices use ``{CODE}:{provider_id}``. Source-prefixed fetch/parse
     codes are attributed from ``{provider_id}-docs-``.
+
+    History-write markers name a provider, but they are not refresh notices.
+    Replacing that provider's records must not drop them.
     """
+    if is_history_write_failure_code(code):
+        return None
     if code == _PARTIAL_NOTICE_PREFIX:
         return PROVIDER_OPENAI
     if ":" in code:

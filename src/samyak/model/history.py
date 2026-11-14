@@ -17,7 +17,7 @@ from samyak.model.errors import CatalogDecodeError, CatalogValidationError, Hist
 from samyak.model.facts import Fact, FactStatus, LifecycleState, validate_timestamp
 from samyak.model.identity import ModelIdentity, parse_samyak_id, validate_provider_id
 from samyak.model.lifecycle import LifecycleChange, LifecycleChangeType
-from samyak.model.records import ModelRecord
+from samyak.model.records import EvidenceDisposition, ModelRecord
 
 HISTORY_SCHEMA_VERSION = 1
 SUPPORTED_HISTORY_SCHEMA_VERSIONS = frozenset({HISTORY_SCHEMA_VERSION})
@@ -44,6 +44,8 @@ _EVENT_FIELDS = frozenset(
         "current_retirement_at",
         "previous_replacement",
         "current_replacement",
+        "previous_evidence_disposition",
+        "current_evidence_disposition",
     }
 )
 _SNAPSHOT_FIELDS = frozenset({"status", "value", "claims"})
@@ -85,6 +87,8 @@ class LifecycleHistoryEvent:
     current_retirement_at: LifecycleFactSnapshot | None = None
     previous_replacement: LifecycleFactSnapshot | None = None
     current_replacement: LifecycleFactSnapshot | None = None
+    previous_evidence_disposition: EvidenceDisposition | None = None
+    current_evidence_disposition: EvidenceDisposition | None = None
 
     def __post_init__(self) -> None:
         validate_provider_id(self.provider_id)
@@ -96,7 +100,7 @@ class LifecycleHistoryEvent:
             raise CatalogValidationError("lifecycle history change_type is not a known change type")
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "provider_id": self.provider_id,
             "samyak_id": self.samyak_id,
             "observed_at": self.observed_at,
@@ -110,6 +114,11 @@ class LifecycleHistoryEvent:
             "previous_replacement": _snapshot_to_json(self.previous_replacement),
             "current_replacement": _snapshot_to_json(self.current_replacement),
         }
+        if self.previous_evidence_disposition is not None:
+            result["previous_evidence_disposition"] = self.previous_evidence_disposition.value
+        if self.current_evidence_disposition is not None:
+            result["current_evidence_disposition"] = self.current_evidence_disposition.value
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +243,19 @@ def _event_from_change(
         kwargs.update(_record_snapshots(current, prefix="current"))
     elif change.change_type is LifecycleChangeType.REMOVED:
         kwargs.update(_record_snapshots(previous, prefix="previous"))
+    elif change.change_type is LifecycleChangeType.DOCUMENTATION_CHANGED:
+        return LifecycleHistoryEvent(
+            provider_id=provider_id,
+            samyak_id=change.samyak_id,
+            observed_at=observed_at,
+            change_type=change.change_type,
+            previous_evidence_disposition=(
+                None if previous is None else previous.evidence_disposition
+            ),
+            current_evidence_disposition=(
+                None if current is None else current.evidence_disposition
+            ),
+        )
     elif change.change_type is LifecycleChangeType.LIFECYCLE_CHANGED:
         kwargs["previous_lifecycle"] = snapshot_from_fact(
             None if previous is None else previous.lifecycle
@@ -344,6 +366,12 @@ def _event_from_dict(payload: object) -> LifecycleHistoryEvent:
         current_retirement_at=_snapshot_from_json(payload.get("current_retirement_at")),
         previous_replacement=_snapshot_from_json(payload.get("previous_replacement")),
         current_replacement=_snapshot_from_json(payload.get("current_replacement")),
+        previous_evidence_disposition=_disposition_from_json(
+            "previous_evidence_disposition", payload.get("previous_evidence_disposition")
+        ),
+        current_evidence_disposition=_disposition_from_json(
+            "current_evidence_disposition", payload.get("current_evidence_disposition")
+        ),
     )
 
 
@@ -366,6 +394,15 @@ def _snapshot_from_json(payload: object) -> LifecycleFactSnapshot | None:
     return LifecycleFactSnapshot(status=status, value=payload.get("value"), claims=tuple(claims))
 
 
+def _disposition_from_json(name: str, value: object) -> EvidenceDisposition | None:
+    if value is None:
+        return None
+    try:
+        return EvidenceDisposition(_require_str(name, value))
+    except ValueError as exc:
+        raise CatalogDecodeError(f"{name} is not a known evidence disposition") from exc
+
+
 def _snapshot_to_json(snapshot: LifecycleFactSnapshot | None) -> dict[str, Any] | None:
     if snapshot is None:
         return None
@@ -375,6 +412,13 @@ def _snapshot_to_json(snapshot: LifecycleFactSnapshot | None) -> dict[str, Any] 
 def _event_detail_lines(event: LifecycleHistoryEvent) -> list[str]:
     heading = _event_heading(event)
     lines = [heading]
+    if event.change_type is LifecycleChangeType.DOCUMENTATION_CHANGED:
+        lines.append(
+            "Documentation evidence: "
+            f"{_disposition_label(event.previous_evidence_disposition)} → "
+            f"{_disposition_label(event.current_evidence_disposition)}"
+        )
+        return lines
     if event.change_type is LifecycleChangeType.LIFECYCLE_CHANGED:
         previous = _snapshot_label(event.previous_lifecycle)
         current = _snapshot_label(event.current_lifecycle)
@@ -423,6 +467,8 @@ def _event_heading(event: LifecycleHistoryEvent) -> str:
         return "ADDED"
     if event.change_type is LifecycleChangeType.REMOVED:
         return "REMOVED FROM DOCUMENTED CATALOG"
+    if event.change_type is LifecycleChangeType.DOCUMENTATION_CHANGED:
+        return "DOCUMENTATION EVIDENCE CHANGED"
     if event.change_type is LifecycleChangeType.DEPRECATION_DATE_CHANGED:
         return "DEPRECATION DATE CHANGED"
     if event.change_type is LifecycleChangeType.RETIREMENT_DATE_CHANGED:
@@ -433,6 +479,12 @@ def _event_heading(event: LifecycleHistoryEvent) -> str:
     if label in {"DEPRECATED", "RETIRED", "LEGACY", "ACTIVE", "CONFLICT"}:
         return label
     return "LIFECYCLE CHANGED"
+
+
+def _disposition_label(value: EvidenceDisposition | None) -> str:
+    if value is None:
+        return "UNKNOWN (legacy catalog)"
+    return value.value.upper().replace("_", " ")
 
 
 def _snapshot_label(snapshot: LifecycleFactSnapshot | None) -> str:

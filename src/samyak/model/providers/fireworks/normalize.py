@@ -26,10 +26,11 @@ from samyak.model.identity import IdentityKind, ModelIdentity
 from samyak.model.providers.fireworks.errors import FireworksAdapterError
 from samyak.model.providers.fireworks.observations import (
     FireworksLifecycle,
+    FireworksLifecycleScope,
     FireworksModelObservation,
 )
 from samyak.model.providers.fireworks.sources import PROVIDER_ID, FireworksSourceType
-from samyak.model.records import ModelRecord
+from samyak.model.records import EvidenceDisposition, ModelRecord
 
 _SOURCE_RANK = {
     FireworksSourceType.CHANGELOG: 3,
@@ -131,9 +132,12 @@ def _record_for(
     capability_present = any(
         item.source.source_type is not FireworksSourceType.CHANGELOG for item in group
     )
-    changelog_present = any(
-        item.source.source_type is FireworksSourceType.CHANGELOG for item in group
+    disposition = (
+        EvidenceDisposition.CURRENT_DOCUMENTED
+        if capability_present
+        else EvidenceDisposition.HISTORICAL_REFERENCE_ONLY
     )
+    changelog_present = any(_global_lifecycle_eligible(item) for item in group)
     fallback = _fallback_observation(group)
     lifecycle_group = _observations_for_lifecycle_fields(group)
 
@@ -224,13 +228,18 @@ def _record_for(
         field="structured_output",
         evaluated=capability_present,
     )
-    api_access = _merge(
-        group,
-        lambda item: item.api_access,
-        verified_at,
-        fallback,
-        field="api_access",
-        evaluated=capability_present,
+    api_group = tuple(item for item in group if _global_lifecycle_eligible(item))
+    api_access = (
+        _merge(
+            api_group,
+            lambda item: item.api_access,
+            verified_at,
+            fallback,
+            field="api_access",
+            evaluated=capability_present,
+        )
+        if api_group
+        else Fact(status=FactStatus.NOT_VERIFIED)
     )
     if (
         lifecycle.status is FactStatus.KNOWN
@@ -314,6 +323,7 @@ def _record_for(
     return ModelRecord(
         identity=identity,
         identity_kind=identity_kind,
+        evidence_disposition=disposition,
         display_name=display_name,
         aliases=aliases,
         resolves_to=resolves_fact,
@@ -348,6 +358,7 @@ class _DeprecationEvent:
         item = self.observation
         return (
             item.deprecation_listing,
+            item.lifecycle_scope,
             item.lifecycle,
             item.deprecated_at,
             item.retirement_at,
@@ -358,12 +369,17 @@ class _DeprecationEvent:
 def _observations_for_lifecycle_fields(
     group: Sequence[FireworksModelObservation],
 ) -> tuple[FireworksModelObservation, ...]:
-    changelog = [item for item in group if item.source.source_type is FireworksSourceType.CHANGELOG]
+    changelog = [
+        item
+        for item in group
+        if item.source.source_type is FireworksSourceType.CHANGELOG
+        and _global_lifecycle_eligible(item)
+    ]
     others = [
         item for item in group if item.source.source_type is not FireworksSourceType.CHANGELOG
     ]
     if len(changelog) <= 1:
-        return tuple(group)
+        return tuple(others) + tuple(changelog)
     current = _current_deprecation_observations(changelog)
     return tuple(others) + current
 
@@ -387,6 +403,13 @@ def _current_deprecation_observations(
     if latest is None:
         return tuple(event.observation for event in past)
     return (latest.observation,)
+
+
+def _global_lifecycle_eligible(item: FireworksModelObservation) -> bool:
+    """Keep scoped changelog evidence raw without promoting it to global facts."""
+    if item.source.source_type is not FireworksSourceType.CHANGELOG:
+        return True
+    return item.lifecycle_scope in {None, FireworksLifecycleScope.GLOBAL}
 
 
 def _unique_events(events: Iterable[_DeprecationEvent]) -> tuple[_DeprecationEvent, ...]:
