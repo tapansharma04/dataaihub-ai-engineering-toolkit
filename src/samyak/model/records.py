@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
+from enum import StrEnum
 from typing import Any
 
 from samyak.model.errors import CatalogValidationError
@@ -21,6 +22,20 @@ from samyak.model.facts import (
 from samyak.model.identity import IdentityKind, ModelIdentity
 
 _UNVERIFIED = unverified_fact
+
+
+class EvidenceDisposition(StrEnum):
+    """How current provider documentation establishes an identity.
+
+    This is evidence metadata, not a lifecycle or availability claim.
+    ``None`` is reserved for legacy catalog records written before this field
+    existed; it deliberately does not certify current documentation.
+    """
+
+    CURRENT_DOCUMENTED = "current_documented"
+    HISTORICAL_REFERENCE_ONLY = "historical_reference_only"
+    NOT_OBSERVED_IN_CURRENT_CAPTURE = "not_observed_in_current_capture"
+
 
 RECORD_FACT_NAMES: tuple[str, ...] = (
     "display_name",
@@ -50,6 +65,7 @@ class ModelRecord:
 
     identity: ModelIdentity
     identity_kind: IdentityKind = IdentityKind.CANONICAL
+    evidence_disposition: EvidenceDisposition | None = EvidenceDisposition.CURRENT_DOCUMENTED
     display_name: Fact[str] = field(default_factory=_UNVERIFIED)
     aliases: Fact[tuple[str, ...]] = field(default_factory=_UNVERIFIED)
     resolves_to: Fact[ModelIdentity] = field(default_factory=_UNVERIFIED)
@@ -94,7 +110,7 @@ class ModelRecord:
         return derived_observed_sources(self)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "samyak_id": self.samyak_id,
             "provider_id": self.provider_id,
             "provider_model_id": self.provider_model_id,
@@ -133,6 +149,11 @@ class ModelRecord:
             "regions": self.regions.to_dict(list),
             "observed_sources": list(self.observed_sources),
         }
+        # Older catalogs did not carry a disposition. Preserve that exact
+        # uncertainty on a read/write round trip rather than certifying it.
+        if self.evidence_disposition is not None:
+            result["evidence_disposition"] = self.evidence_disposition.value
+        return result
 
 
 def validate_model_record(record: ModelRecord) -> None:
@@ -140,6 +161,10 @@ def validate_model_record(record: ModelRecord) -> None:
         raise CatalogValidationError("identity must be a ModelIdentity")
     if not isinstance(record.identity_kind, IdentityKind):
         raise CatalogValidationError("identity_kind is not a known identity kind")
+    if record.evidence_disposition is not None and not isinstance(
+        record.evidence_disposition, EvidenceDisposition
+    ):
+        raise CatalogValidationError("evidence_disposition is not a known evidence disposition")
 
     _typed_fact("display_name", record.display_name, _require_str)
     _typed_fact("aliases", record.aliases, _require_str_tuple)
@@ -196,6 +221,15 @@ def derived_observed_sources(record: ModelRecord) -> tuple[str, ...]:
                 seen.add(source_id)
                 ordered.append(source_id)
     return tuple(ordered)
+
+
+def is_currently_documented_active(record: ModelRecord) -> bool:
+    """Whether a record can appear in a currently available active listing."""
+    return (
+        record.evidence_disposition is EvidenceDisposition.CURRENT_DOCUMENTED
+        and record.lifecycle.status is FactStatus.KNOWN
+        and record.lifecycle.value is LifecycleState.ACTIVE
+    )
 
 
 def _validate_lifecycle_dates(record: ModelRecord) -> None:

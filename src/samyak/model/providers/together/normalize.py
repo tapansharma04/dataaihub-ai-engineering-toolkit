@@ -156,7 +156,7 @@ def _record_for(
         field="deprecated_at",
     )
     retirement_at = _merge(
-        lifecycle_group,
+        _observations_for_retirement_dates(group, lifecycle_group),
         lambda item: item.retirement_at,
         verified_at,
         fallback,
@@ -355,6 +355,55 @@ class _DeprecationEvent:
             item.retirement_at,
             item.replacements,
         )
+
+
+def _observations_for_retirement_dates(
+    group: Sequence[TogetherModelObservation],
+    lifecycle_group: Sequence[TogetherModelObservation],
+) -> tuple[TogetherModelObservation, ...]:
+    """Keep labelled removal dates the current-versus-past filter would hide.
+
+    Lifecycle and replacement still follow that filter. ``retirement_at`` also
+    keeps a labelled date the filter dropped, including a second past date and
+    a history date beside a current listing. The catalog has one retirement
+    fact and no service scope, so inference and fine-tuning dates conflict.
+    A past date is not restored when the model is on the current serverless
+    catalogue and has no current deprecation event.
+    """
+    stated_rank: dict[str, int] = {}
+    for item in lifecycle_group:
+        if item.retirement_at is None:
+            continue
+        rank = _SOURCE_RANK[item.source.source_type]
+        stated_rank[item.retirement_at] = max(stated_rank.get(item.retirement_at, -1), rank)
+    extra: list[TogetherModelObservation] = []
+    seen = {id(item) for item in lifecycle_group}
+    documented_serverless = any(item.documented_serverless for item in group)
+    has_current_deprecation = any(
+        item.source.source_type in _LIFECYCLE_SOURCES
+        and item.deprecation_listing in {None, "current", "upcoming"}
+        for item in group
+    )
+    for item in group:
+        if item.source.source_type not in _LIFECYCLE_SOURCES:
+            continue
+        if item.retirement_at is None or id(item) in seen:
+            continue
+        rank = _SOURCE_RANK[item.source.source_type]
+        if stated_rank.get(item.retirement_at, -1) >= rank:
+            continue
+        if (
+            documented_serverless
+            and not has_current_deprecation
+            and item.deprecation_listing == "past"
+        ):
+            continue
+        extra.append(item)
+        seen.add(id(item))
+        stated_rank[item.retirement_at] = rank
+    if not extra:
+        return tuple(lifecycle_group)
+    return tuple(lifecycle_group) + tuple(extra)
 
 
 def _observations_for_lifecycle_fields(

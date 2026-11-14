@@ -32,7 +32,7 @@ from samyak.model.facts import (
     unverified_fact,
 )
 from samyak.model.identity import IdentityKind, ModelIdentity, parse_samyak_id
-from samyak.model.records import ModelRecord
+from samyak.model.records import EvidenceDisposition, ModelRecord
 from samyak.model.serialize import catalog_from_dict, catalog_from_json, catalog_to_json
 from samyak.model.store import CatalogSource
 
@@ -293,6 +293,35 @@ def test_catalog_round_trip_and_deterministic_json() -> None:
     )
     assert catalog_to_json(reversed_models) == catalog_to_json(catalog)
     assert json.loads(catalog_to_json(catalog)) == payload
+
+
+@pytest.mark.parametrize("disposition", tuple(EvidenceDisposition))
+def test_evidence_disposition_round_trips(disposition: EvidenceDisposition) -> None:
+    catalog = build_catalog(
+        models=(_model(evidence_disposition=disposition),),
+        generated_at=GENERATED_AT,
+        freshness=_freshness(),
+    )
+    payload = catalog.to_dict()
+    assert payload["models"][0]["evidence_disposition"] == disposition.value
+    assert catalog_from_dict(payload).models[0].evidence_disposition is disposition
+
+
+def test_legacy_record_without_disposition_remains_uncertified() -> None:
+    catalog = build_catalog(models=(_model(),), generated_at=GENERATED_AT, freshness=_freshness())
+    payload = catalog.to_dict()
+    del payload["models"][0]["evidence_disposition"]
+    restored = catalog_from_dict(payload)
+    assert restored.models[0].evidence_disposition is None
+    assert "evidence_disposition" not in restored.to_dict()["models"][0]
+
+
+def test_invalid_evidence_disposition_is_rejected() -> None:
+    catalog = build_catalog(models=(_model(),), generated_at=GENERATED_AT, freshness=_freshness())
+    payload = catalog.to_dict()
+    payload["models"][0]["evidence_disposition"] = "active"
+    with pytest.raises(CatalogDecodeError, match="evidence_disposition"):
+        catalog_from_dict(payload)
 
 
 def test_malformed_catalog_and_schema_rejected() -> None:

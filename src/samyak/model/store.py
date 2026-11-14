@@ -11,6 +11,7 @@ Layout (under the Samyak cache directory)::
         catalog.json              # live overlay; current-state correctness boundary
         catalog.json.bak          # best-effort previous overlay; not part of the commit invariant
         lifecycle-history.json    # documented lifecycle-change log; not current state
+        source-archive/           # optional diagnostics; not read by export
 
 ``catalog.json`` is replaced atomically (temp file, fsync, ``os.replace``).
 ``catalog.json.bak`` is updated only after a successful live replace, and a
@@ -72,6 +73,12 @@ class FileCatalogStore:
 
     def load(self) -> ModelCatalog:
         """Return the overlay catalog. Raises if missing or unreadable."""
+        # A supported coordinated update leaves legacy filenames in place but
+        # may have a durable journal after interruption. Recover it before a
+        # legacy single-file read can accept half of that update.
+        from samyak.model.transaction import recover_catalog_history
+
+        recover_catalog_history(self.root)
         if not self.exists():
             raise CatalogNotFoundError("no local model catalog")
         try:

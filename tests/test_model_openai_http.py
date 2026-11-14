@@ -18,6 +18,7 @@ from samyak.model.facts import FactStatus
 from samyak.model.http import (
     FixtureHop,
     FixtureTransport,
+    RedirectHop,
     TransportError,
     TransportPolicy,
     TransportSecurityError,
@@ -191,8 +192,143 @@ def test_excessive_redirects_are_rejected() -> None:
         pages[urls[index]] = FixtureHop(location=urls[index + 1])
     pages[urls[6]] = FixtureHop(body=b"# Models\n")
     transport = _transport(pages)
-    with pytest.raises(TransportSecurityError, match="too many redirects"):
+    with pytest.raises(TransportSecurityError, match="too many redirects") as caught:
         transport.get(urls[0])
+    hops = caught.value.redirects
+    assert len(hops) == 6
+    assert all(hop.accepted for hop in hops[:-1])
+    assert hops[-1] == RedirectHop(302, urls[6], False, "too many redirects")
+    assert transport._cursors[urls[6]] == 0
+
+
+def test_direct_fetch_has_no_redirect_trace() -> None:
+    response = _transport({MODELS_INDEX_URL: _md("models.md")}).get(MODELS_INDEX_URL)
+    assert response.status == 200
+    assert response.final_url == MODELS_INDEX_URL
+    assert response.redirects == ()
+
+
+def test_same_origin_different_path_stays_rejected_with_diagnostics() -> None:
+    """A same-host path change is not an allowlist. The destination is still recorded."""
+    requested = model_page_url("gpt-5.6-sol")
+    other = model_page_url("gpt-5.6")
+    transport = _transport(
+        {
+            requested: FixtureHop(location=other),
+            other: _md("models/gpt-5.6.md"),
+        }
+    )
+    with pytest.raises(OpenAIFetchError, match="different official document") as caught:
+        capture_openai_source(transport, model_page_descriptor("gpt-5.6-sol"))
+    hop = caught.value.redirects[-1]
+    assert hop == RedirectHop(
+        302,
+        other,
+        False,
+        "OpenAI documentation redirected to a different official document",
+    )
+    assert hop.destination.startswith("https://developers.openai.com/")
+    assert hop.destination.removeprefix("https://developers.openai.com") != (
+        requested.removeprefix("https://developers.openai.com")
+    )
+
+
+def test_exact_document_redirect_is_accepted_without_a_different_path_allowlist() -> None:
+    """The approved destination is the configured document, including an explicit port."""
+    body = (FIXTURES / "models.md").read_bytes()
+    transport = _transport(
+        {
+            MODELS_INDEX_URL: FixtureHop(location=INDEX_443),
+            INDEX_443: FixtureHop(body=body),
+        }
+    )
+    response = transport.get(MODELS_INDEX_URL)
+    assert response.redirects == (RedirectHop(302, INDEX_443, True, None),)
+    captured = capture_openai_source(
+        _transport(
+            {
+                MODELS_INDEX_URL: FixtureHop(location=INDEX_443),
+                INDEX_443: FixtureHop(body=body),
+            }
+        ),
+        models_index_descriptor(),
+    )
+    assert captured.source_url == INDEX_443
+    assert captured.body_bytes == body
+
+
+def test_cross_origin_redirect_keeps_the_rejected_destination() -> None:
+    destination = "https://platform.openai.com/api/docs/models.md"
+    transport = _transport({MODELS_INDEX_URL: FixtureHop(status=301, location=destination)})
+    with pytest.raises(TransportSecurityError, match="approved documentation host") as caught:
+        transport.get(MODELS_INDEX_URL)
+    assert caught.value.redirects == (
+        RedirectHop(301, destination, False, "URL host is not an approved documentation host"),
+    )
+
+
+def test_redirect_to_unapproved_host_keeps_the_rejected_destination() -> None:
+    destination = "https://evil.example/api/docs/models.md"
+    transport = _transport({MODELS_INDEX_URL: FixtureHop(status=302, location=destination)})
+    with pytest.raises(TransportSecurityError, match="approved documentation host") as caught:
+        transport.get(MODELS_INDEX_URL)
+    hop = caught.value.redirects[-1]
+    assert hop.destination == destination
+    assert hop.accepted is False
+    assert hop.reason == "URL host is not an approved documentation host"
+
+
+def test_http_downgrade_keeps_the_rejected_destination() -> None:
+    destination = "http://developers.openai.com/api/docs/models.md"
+    transport = _transport({MODELS_INDEX_URL: FixtureHop(status=302, location=destination)})
+    with pytest.raises(TransportSecurityError, match="HTTPS") as caught:
+        transport.get(MODELS_INDEX_URL)
+    assert caught.value.redirects == (
+        RedirectHop(302, destination, False, "only HTTPS URLs are permitted"),
+    )
+
+
+def test_redirect_loop_keeps_the_chain() -> None:
+    first = model_page_url("loop-a")
+    second = model_page_url("loop-b")
+    transport = _transport(
+        {
+            first: FixtureHop(status=302, location=second),
+            second: FixtureHop(status=307, location=first),
+        }
+    )
+    with pytest.raises(TransportSecurityError, match="redirect loop") as caught:
+        transport.get(first)
+    assert caught.value.redirects == (
+        RedirectHop(302, second, True, None),
+        RedirectHop(307, first, False, "redirect loop"),
+    )
+
+
+def test_redirect_diagnostics_strip_credentials_and_query() -> None:
+    secret = "secret-token"
+    location = (
+        f"https://user:{secret}@developers.openai.com"
+        f"/api/docs/models.md?token={secret}&api_key={secret}#section"
+    )
+    transport = _transport(
+        {
+            MODELS_INDEX_URL: FixtureHop(
+                location=location,
+                headers=(("Set-Cookie", f"session={secret}"),),
+                body=secret.encode(),
+            )
+        }
+    )
+    with pytest.raises(TransportSecurityError, match="credentials") as caught:
+        transport.get(MODELS_INDEX_URL)
+    hop = caught.value.redirects[-1]
+    assert hop.destination == "https://developers.openai.com/api/docs/models.md"
+    assert hop.accepted is False
+    assert hop.reason == "URLs must not include credentials"
+    evidence = f"{caught.value} {hop.destination} {hop.reason}"
+    assert secret not in evidence
+    assert "Set-Cookie" not in evidence
 
 
 def test_timeout_is_explicit() -> None:

@@ -39,6 +39,9 @@ class FileLifecycleHistoryStore:
         return self.history_path.is_file()
 
     def load(self) -> LifecycleHistory:
+        from samyak.model.transaction import recover_catalog_history
+
+        recover_catalog_history(self.root)
         if not self.exists():
             return LifecycleHistory()
         try:

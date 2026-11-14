@@ -46,6 +46,7 @@ CHANGELOG_URL = f"{DOCS_ORIGIN}{CHANGELOG_PATH}"
 # quickstarts and www.together.ai/models pages are not in this set.
 MODEL_PAGE_SLUGS = (
     "glm-5.2-quickstart",
+    "glm-5.3-quickstart",
     "kimi-k3-quickstart",
     "deepseek-v4-quickstart",
     "kimi-k2.6-quickstart",

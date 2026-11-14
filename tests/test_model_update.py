@@ -93,7 +93,7 @@ from samyak.model.providers.together.sources import (
 from samyak.model.providers.together.sources import (
     optional_source_descriptors as together_optional_source_descriptors,
 )
-from samyak.model.records import ModelRecord
+from samyak.model.records import EvidenceDisposition, ModelRecord
 from samyak.model.serialize import catalog_from_json
 from samyak.model.store import FileCatalogStore
 from samyak.model.update import (
@@ -1489,7 +1489,7 @@ def test_fireworks_partial_refresh_still_adds_new_serving_path_models(tmp_path: 
     assert "fireworks:accounts/fireworks/routers/kimi-k3-fast" in loaded_ids
 
 
-def test_fireworks_successful_page_without_model_still_reports_removal(tmp_path: Path) -> None:
+def test_fireworks_complete_capture_retains_absent_identity_as_not_observed(tmp_path: Path) -> None:
     store = FileCatalogStore(root=tmp_path / "cache")
     first = update_fireworks_catalog(
         transport=_fireworks_transport(_fireworks_pages()),
@@ -1506,17 +1506,21 @@ def test_fireworks_successful_page_without_model_still_reports_removal(tmp_path:
     )
     assert second.committed is True
     assert second.partial is False
-    removed = {
-        item.samyak_id
+    assert not any(
+        item.change_type is LifecycleChangeType.REMOVED for item in second.lifecycle_changes
+    )
+    changed = [
+        item
         for item in second.lifecycle_changes
-        if item.change_type is LifecycleChangeType.REMOVED
-    }
-    assert _KIMI_INSTRUCT_ID in removed
-    loaded_ids = {item.samyak_id for item in store.load().models}
-    assert _KIMI_INSTRUCT_ID not in loaded_ids
+        if item.samyak_id == _KIMI_INSTRUCT_ID
+        and item.change_type is LifecycleChangeType.DOCUMENTATION_CHANGED
+    ]
+    assert len(changed) == 1
+    retained = _fireworks_record(store.load(), _KIMI_INSTRUCT_ID)
+    assert retained.evidence_disposition is EvidenceDisposition.NOT_OBSERVED_IN_CURRENT_CAPTURE
 
 
-def test_fireworks_unrelated_optional_failure_does_not_suppress_removal(
+def test_fireworks_partial_capture_preserves_absent_identity_without_negative_claim(
     tmp_path: Path,
 ) -> None:
     store = FileCatalogStore(root=tmp_path / "cache")
@@ -1534,16 +1538,11 @@ def test_fireworks_unrelated_optional_failure_does_not_suppress_removal(
         clock=lambda: "2026-09-12T14:00:00+00:00",
     )
     assert second.partial is True
-    removed = {
-        item.samyak_id
-        for item in second.lifecycle_changes
-        if item.change_type is LifecycleChangeType.REMOVED
-    }
-    assert "fireworks:accounts/fireworks/routers/glm-5p2-fast" in removed
-    assert _KIMI_INSTRUCT_ID not in removed
-    loaded_ids = {item.samyak_id for item in store.load().models}
-    assert "fireworks:accounts/fireworks/routers/glm-5p2-fast" not in loaded_ids
-    assert _KIMI_INSTRUCT_ID in loaded_ids
+    assert not any(
+        item.change_type is LifecycleChangeType.REMOVED for item in second.lifecycle_changes
+    )
+    retained = _fireworks_record(store.load(), "fireworks:accounts/fireworks/routers/glm-5p2-fast")
+    assert retained.evidence_disposition is EvidenceDisposition.CURRENT_DOCUMENTED
 
 
 def _retention_provenance(source_id: str) -> Provenance:
@@ -1665,7 +1664,7 @@ def test_partial_refresh_unrelated_optional_failure_does_not_retain_other_invent
     assert "fireworks:inventory-b" not in ids
 
 
-def test_failed_optional_page_does_not_retain_inventory_established_model(
+def test_failed_optional_page_preserves_inventory_established_model_without_relabeling(
     tmp_path: Path,
 ) -> None:
     store = FileCatalogStore(root=tmp_path / "cache")
@@ -1705,16 +1704,12 @@ def test_failed_optional_page_does_not_retain_inventory_established_model(
         clock=lambda: "2026-09-12T14:00:00+00:00",
     )
     assert second.partial is True
-    removed = {
-        item.samyak_id
-        for item in second.lifecycle_changes
-        if item.change_type is LifecycleChangeType.REMOVED
-    }
-    assert glm_id in removed
-    assert _KIMI_INSTRUCT_ID not in removed
-    loaded_ids = {item.samyak_id for item in store.load().models}
-    assert glm_id not in loaded_ids
-    assert _KIMI_INSTRUCT_ID in loaded_ids
+    assert not any(
+        item.change_type is LifecycleChangeType.REMOVED for item in second.lifecycle_changes
+    )
+    retained = _fireworks_record(store.load(), glm_id)
+    assert retained.evidence_disposition is EvidenceDisposition.CURRENT_DOCUMENTED
+    assert retained.tool_calling == mutated.tool_calling
 
 
 def test_corrupt_catalog_fireworks_update_does_not_write(tmp_path: Path) -> None:

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import http.client
 import json
+import subprocess
 import threading
+from dataclasses import replace
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import urlopen
@@ -18,6 +20,7 @@ from samyak.model.catalog import (
     FreshnessStatus,
     build_catalog,
 )
+from samyak.model.compare import compare_models, comparison_to_dict
 from samyak.model.facts import (
     Confidence,
     ContextWindow,
@@ -31,10 +34,18 @@ from samyak.model.facts import (
     SourceKind,
 )
 from samyak.model.identity import IdentityKind, ModelIdentity
-from samyak.model.records import ModelRecord
+from samyak.model.query import ModelQuery, query_models
+from samyak.model.records import EvidenceDisposition, ModelRecord
 from samyak.model.store import FileCatalogStore
 from samyak.server.app import create_server, viewer_url
-from samyak.server.model_catalog import filter_models
+from samyak.server.model_catalog import (
+    _EXPLORER_SCRIPT,
+    _ensure_unique_model_ids,
+    _query_index_record,
+    filter_models,
+    render_model_catalog,
+)
+from samyak.server.model_detail import render_model_detail
 from samyak.store.filesystem import FileRunStore
 
 GENERATED_AT = "2026-09-10T17:35:13+00:00"
@@ -154,6 +165,226 @@ def _stop(server, thread: threading.Thread) -> None:
 
 def _get(url: str):
     return urlopen(url, timeout=5)
+
+
+def _evaluate_explorer(
+    data: list[dict[str, object]], state: dict[str, object]
+) -> dict[str, object]:
+    """Run the exact script embedded in the catalog page under Node."""
+    program = (
+        _EXPLORER_SCRIPT + "\nconst input=JSON.parse(require('fs').readFileSync(0,'utf8'));"
+        "process.stdout.write(JSON.stringify(globalThis.samyakEvaluateExplorer(input.data,input.state)));"
+    )
+    result = subprocess.run(
+        ["node", "-e", program],
+        input=json.dumps({"data": data, "state": state}),
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def _explain_explorer(
+    data: list[dict[str, object]], state: dict[str, object], model_id: str
+) -> dict[str, object]:
+    """Run the explanation presenter without a browser DOM."""
+    program = (
+        _EXPLORER_SCRIPT + "\nconst input=JSON.parse(require('fs').readFileSync(0,'utf8'));"
+        "const result=globalThis.samyakEvaluateExplorer(input.data,input.state);"
+        "process.stdout.write(JSON.stringify(globalThis.samyakExplainExplorer("
+        "input.data,input.state,result,input.model_id)));"
+    )
+    result = subprocess.run(
+        ["node", "-e", program],
+        input=json.dumps({"data": data, "state": state, "model_id": model_id}),
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def _compare_explorer(
+    data: list[dict[str, object]], ids: list[str], **options: object
+) -> dict[str, object]:
+    program = (
+        _EXPLORER_SCRIPT + "\nconst input=JSON.parse(require('fs').readFileSync(0,'utf8'));"
+        "process.stdout.write(JSON.stringify(globalThis.samyakCompareExplorer("
+        "input.data,input.ids,input.options)));"
+    )
+    result = subprocess.run(
+        ["node", "-e", program],
+        input=json.dumps({"data": data, "ids": ids, "options": options}),
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def _explorer_state(**overrides: object) -> dict[str, object]:
+    state: dict[str, object] = {
+        "documentation": ["current_documented"],
+        "providers": [],
+        "lifecycle": "",
+        "tool": "",
+        "api": "",
+        "structured": "",
+        "input": [],
+        "output": [],
+        "context": 0,
+        "kind": "",
+    }
+    state.update(overrides)
+    return state
+
+
+def test_explorer_node_uses_stable_ids_and_matches_python_query() -> None:
+    records = tuple(
+        replace(record, evidence_disposition=EvidenceDisposition.CURRENT_DOCUMENTED)
+        for record in _sample_catalog().models
+    )
+    data = [_query_index_record(record) for record in records]
+    state = _explorer_state(tool="true", api="true", input=["text"], output=["text"])
+
+    actual = _evaluate_explorer(data, state)
+    expected = query_models(
+        records,
+        ModelQuery(
+            tool_calling=True,
+            api_access=True,
+            input_modalities=frozenset({Modality.TEXT}),
+            output_modalities=frozenset({Modality.TEXT}),
+        ),
+    )
+
+    assert actual["matching_ids"] == [match.samyak_id for match in expected.matches]
+    assert actual["match_count"] == expected.summary.matching_records
+    assert actual["eligible_count"] == expected.summary.documentation_eligible_records
+    assert actual["ids"] == actual["matching_ids"]
+    assert actual["eligible"] == actual["eligible_count"]
+    assert actual["exclusions"] == [
+        {"samyak_id": item.samyak_id, "reasons": list(item.reasons)} for item in expected.exclusions
+    ]
+    assert actual["exclusion_reason_counts"] == dict(expected.summary.exclusion_reason_counts)
+
+
+def test_explorer_node_scope_identity_order_and_input_are_safe() -> None:
+    special = replace(
+        _model(
+            'special"<>&',
+            lifecycle=_known(LifecycleState.ACTIVE),
+            api_access=_known(True),
+            input_modalities=_known((Modality.TEXT,)),
+            output_modalities=_known((Modality.TEXT,)),
+        ),
+        evidence_disposition=EvidenceDisposition.CURRENT_DOCUMENTED,
+    )
+    unscoped = replace(
+        _model("unscoped", lifecycle=_known(LifecycleState.ACTIVE)),
+        evidence_disposition=EvidenceDisposition.CURRENT_DOCUMENTED,
+    )
+    data = [_query_index_record(unscoped), _query_index_record(special)]
+    data[0]["server_scope"] = False
+    original = json.loads(json.dumps(data))
+
+    actual = _evaluate_explorer(data, _explorer_state())
+
+    assert actual["matching_ids"] == [special.samyak_id]
+    assert actual["eligible_count"] == 1
+    assert data == original
+
+
+def test_explorer_explanations_use_python_emitted_status_and_provenance() -> None:
+    matching = replace(
+        _model(
+            "matching",
+            lifecycle=_known(LifecycleState.ACTIVE),
+            tool_calling=_known(True, source_id="tool-docs"),
+        ),
+        evidence_disposition=EvidenceDisposition.CURRENT_DOCUMENTED,
+    )
+    unknown = replace(
+        _model(
+            "unknown",
+            lifecycle=_known(LifecycleState.ACTIVE),
+            tool_calling=_unknown(source_id="unknown-docs"),
+        ),
+        evidence_disposition=EvidenceDisposition.CURRENT_DOCUMENTED,
+    )
+    data = [_query_index_record(item) for item in (matching, unknown)]
+    state = _explorer_state(tool="true")
+
+    positive = _explain_explorer(data, state, matching.samyak_id)
+    missing = _explain_explorer(data, state, unknown.samyak_id)
+
+    assert positive["summary"].startswith("This model matches")
+    assert positive["lines"][0].startswith("Verified tool calling: true.")
+    assert "Evidence: tool-docs." in positive["lines"][0]
+    assert "Verified: 2026-09-10T17:35:13+00:00." in positive["lines"][0]
+    assert positive["href"] == "/models/openai:matching"
+    assert missing["summary"].startswith("This model is excluded")
+    assert missing["lines"] == ["Tool calling: unknown"]
+    assert "does not support" not in " ".join(missing["lines"])
+
+
+def test_explorer_explanation_respects_scope_and_documentation_gate() -> None:
+    historical = replace(
+        _model("historical", tool_calling=_known(True)),
+        evidence_disposition=EvidenceDisposition.HISTORICAL_REFERENCE_ONLY,
+    )
+    unscoped = replace(
+        _model("unscoped", tool_calling=_known(True)),
+        evidence_disposition=EvidenceDisposition.CURRENT_DOCUMENTED,
+    )
+    data = [_query_index_record(historical), _query_index_record(unscoped)]
+    data[1]["server_scope"] = False
+    explanation = _explain_explorer(data, _explorer_state(tool="true"), historical.samyak_id)
+    absent = _explain_explorer(data, _explorer_state(), unscoped.samyak_id)
+
+    assert explanation["summary"].startswith("This model is excluded")
+    assert explanation["lines"][0] == "Excluded by documentation filter: historical reference only."
+    assert absent["href"] is None
+    assert "Choose a model" in absent["summary"]
+
+
+def test_comparison_projection_matches_python_and_compact_index_keys() -> None:
+    current = replace(
+        _model(
+            "current",
+            lifecycle=_known(LifecycleState.ACTIVE),
+            api_access=_known(False, source_id="api-docs"),
+            tool_calling=_conflict(True, False),
+            input_modalities=_known((Modality.TEXT, Modality.IMAGE)),
+            context_window=_known(ContextWindow(200, ContextWindowKind.COMBINED)),
+        ),
+        evidence_disposition=EvidenceDisposition.CURRENT_DOCUMENTED,
+    )
+    unknown = replace(
+        _model(
+            "unknown",
+            lifecycle=_known(LifecycleState.ACTIVE),
+            tool_calling=_unknown(source_id="unknown-docs"),
+            structured_output=Fact(status=FactStatus.NOT_VERIFIED),
+        ),
+        evidence_disposition=EvidenceDisposition.CURRENT_DOCUMENTED,
+    )
+    records = (current, unknown)
+    data = [_query_index_record(item) for item in records]
+    expected = comparison_to_dict(compare_models(records, (unknown.samyak_id, current.samyak_id)))
+    assert _compare_explorer(data, [unknown.samyak_id, current.samyak_id]) == expected
+    with pytest.raises(subprocess.CalledProcessError):
+        _compare_explorer(data, [current.samyak_id, current.samyak_id])
+    data[1]["server_scope"] = False
+    with pytest.raises(subprocess.CalledProcessError):
+        _compare_explorer(data, [current.samyak_id, unknown.samyak_id])
+
+
+def test_explorer_rejects_duplicate_stable_ids() -> None:
+    record = _model("duplicate", lifecycle=_known(LifecycleState.ACTIVE))
+    with pytest.raises(ValueError, match="unique samyak_id"):
+        _ensure_unique_model_ids((record, record))
 
 
 def test_workspace_is_home_and_lists_sections(tmp_path: Path) -> None:
@@ -279,6 +510,52 @@ def test_filter_models_unknown_provider_falls_back_to_all() -> None:
     assert {item.samyak_id for item in matched} == {item.samyak_id for item in catalog.models}
     openai_only = filter_models(catalog.models, provider="openai")
     assert openai_only == catalog.models
+
+
+def test_active_filter_requires_current_documentation() -> None:
+    active = _model("current", lifecycle=_known(LifecycleState.ACTIVE))
+    historical = _model(
+        "historical",
+        lifecycle=_known(LifecycleState.ACTIVE),
+        evidence_disposition=EvidenceDisposition.HISTORICAL_REFERENCE_ONLY,
+    )
+    absent = _model(
+        "absent",
+        lifecycle=_known(LifecycleState.ACTIVE),
+        evidence_disposition=EvidenceDisposition.NOT_OBSERVED_IN_CURRENT_CAPTURE,
+    )
+    legacy = _model("legacy", lifecycle=_known(LifecycleState.ACTIVE), evidence_disposition=None)
+    assert filter_models((active, historical, absent, legacy), lifecycle="active") == (active,)
+
+
+def test_catalog_presents_documentation_status_separately_from_lifecycle() -> None:
+    historical = _model(
+        "historical",
+        lifecycle=_unknown(),
+        evidence_disposition=EvidenceDisposition.HISTORICAL_REFERENCE_ONLY,
+        api_access=Fact(status=FactStatus.NOT_VERIFIED),
+    )
+    absent = _model(
+        "absent",
+        lifecycle=_known(LifecycleState.ACTIVE),
+        evidence_disposition=EvidenceDisposition.NOT_OBSERVED_IN_CURRENT_CAPTURE,
+    )
+    legacy = _model("legacy", evidence_disposition=None)
+    current = _model("current", lifecycle=_known(LifecycleState.ACTIVE))
+    catalog = _catalog((historical, absent, legacy, current))
+
+    listing = render_model_catalog(catalog)
+    assert "Currently documented" in listing
+    assert "Historical reference only" in listing
+    assert "Not observed in latest complete capture" in listing
+    assert "Documentation status not certified" in listing
+    assert '<span class="life life-retired">' not in listing
+
+    detail = render_model_detail(catalog, historical)
+    assert "Documentation status" in detail
+    assert "Historical reference only" in detail
+    assert "Unknown" in detail
+    assert "Not verified" in detail
 
 
 def test_empty_catalog_renders(tmp_path: Path) -> None:

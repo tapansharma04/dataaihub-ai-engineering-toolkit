@@ -10,7 +10,7 @@ import posixpath
 import ssl
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from typing import NoReturn, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse, urlunparse
 from urllib.request import HTTPSHandler, OpenerDirector, Request
@@ -47,6 +47,16 @@ class TransportPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class RedirectHop:
+    """One sanitized redirect. No headers, body, userinfo, query, or fragment."""
+
+    status: int | None
+    destination: str
+    accepted: bool
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class HttpResponse:
     """Minimal GET result needed to capture a documentation source."""
 
@@ -56,6 +66,7 @@ class HttpResponse:
     headers: tuple[tuple[str, str], ...]
     body: bytes
     retrieved_at: str
+    redirects: tuple[RedirectHop, ...] = ()
 
     def header(self, name: str) -> str | None:
         wanted = name.lower()
@@ -144,6 +155,56 @@ def _path_allowed(path: str, prefixes: frozenset[str]) -> bool:
     return False
 
 
+def sanitize_diagnostic_url(url: str) -> str:
+    """Keep scheme, host, port, and path. Drop userinfo, query, and fragment."""
+    if not isinstance(url, str) or not url.strip():
+        return ""
+    parsed = urlparse(url.strip())
+    host = (parsed.hostname or "").lower()
+    scheme = (parsed.scheme or "").lower()
+    path = parsed.path or ""
+    if not scheme or not host:
+        return path
+    netloc = host if parsed.port is None else f"{host}:{parsed.port}"
+    return urlunparse((scheme, netloc, path, "", "", ""))
+
+
+def redirect_hops(exc: BaseException) -> tuple[RedirectHop, ...]:
+    """Return a redirect trace carried by ``exc`` or an exception it wraps."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        hops = getattr(current, "redirects", None)
+        if hops:
+            return tuple(hops)
+        current = current.__cause__
+    return ()
+
+
+def reraise_fetch(error_type: type[Exception], exc: BaseException) -> NoReturn:
+    """Raise ``error_type`` with the same message and any redirect trace."""
+    wrapped = error_type(str(exc))
+    hops = redirect_hops(exc)
+    if hops:
+        wrapped.redirects = hops  # type: ignore[attr-defined]
+    raise wrapped from exc
+
+
+def with_redirect_rejection(exc: BaseException, response: HttpResponse) -> BaseException:
+    """Mark the final hop rejected and keep the sanitized destination."""
+    reason = exc.args[0] if exc.args and isinstance(exc.args[0], str) else type(exc).__name__
+    final = sanitize_diagnostic_url(response.final_url)
+    hops = list(response.redirects)
+    if hops and hops[-1].destination == final:
+        last = hops[-1]
+        hops[-1] = RedirectHop(last.status, last.destination, False, reason)
+    else:
+        hops.append(RedirectHop(status=None, destination=final, accepted=False, reason=reason))
+    exc.redirects = tuple(hops)  # type: ignore[attr-defined]
+    return exc
+
+
 def complete_get(
     requester: RawRequester,
     url: str,
@@ -151,13 +212,19 @@ def complete_get(
     policy: TransportPolicy,
     clock: Clock,
 ) -> HttpResponse:
-    """Follow redirects under ``policy`` and return the final response."""
+    """Follow redirects under ``policy`` and return the final response.
+
+    Every hop is validated before it is requested. A rejected hop stays on
+    the exception. Same-origin path changes are not given a special allowlist
+    here; the caller still has to accept the final document.
+    """
     requested = validate_transport_url(url, policy)
     current = requested
     retrieved_at = clock()
     follows = 0
+    hops: list[RedirectHop] = []
+    seen = {requested}
     while True:
-        current = validate_transport_url(current, policy)
         try:
             response = requester.request(current)
         except TimeoutError as exc:
@@ -176,12 +243,14 @@ def complete_get(
         if len(response.body) > policy.max_bytes:
             raise TransportSecurityError("response exceeds the maximum permitted size")
         if response.status in _REDIRECT_STATUSES:
-            if follows >= policy.max_redirects:
-                raise TransportSecurityError("too many redirects")
-            location = response.header("location")
-            if not location or not location.strip():
-                raise TransportSecurityError("redirect is missing a Location header")
-            current = urljoin(response.final_url or current, location.strip())
+            current = _next_redirect(
+                response,
+                current=current,
+                policy=policy,
+                follows=follows,
+                hops=hops,
+                seen=seen,
+            )
             follows += 1
             continue
         final_url = validate_transport_url(response.final_url or current, policy)
@@ -194,7 +263,54 @@ def complete_get(
             headers=response.headers,
             body=response.body,
             retrieved_at=retrieved_at,
+            redirects=tuple(hops),
         )
+
+
+def _next_redirect(
+    response: HttpResponse,
+    *,
+    current: str,
+    policy: TransportPolicy,
+    follows: int,
+    hops: list[RedirectHop],
+    seen: set[str],
+) -> str:
+    """Validate the next hop. A rejection keeps the sanitized destination."""
+    location = response.header("location")
+    if not location or not location.strip():
+        exc = TransportSecurityError("redirect is missing a Location header")
+        hops.append(
+            RedirectHop(response.status, "", False, "redirect is missing a Location header")
+        )
+        _attach_redirects(exc, hops)
+        raise exc
+    destination = urljoin(response.final_url or current, location.strip())
+    sanitized = sanitize_diagnostic_url(destination)
+    if follows >= policy.max_redirects:
+        exc = TransportSecurityError("too many redirects")
+        hops.append(RedirectHop(response.status, sanitized, False, "too many redirects"))
+        _attach_redirects(exc, hops)
+        raise exc
+    try:
+        validated = validate_transport_url(destination, policy)
+    except TransportSecurityError as exc:
+        reason = exc.args[0] if exc.args and isinstance(exc.args[0], str) else "redirect rejected"
+        hops.append(RedirectHop(response.status, sanitized, False, reason))
+        _attach_redirects(exc, hops)
+        raise
+    if validated in seen:
+        exc = TransportSecurityError("redirect loop")
+        hops.append(RedirectHop(response.status, validated, False, "redirect loop"))
+        _attach_redirects(exc, hops)
+        raise exc
+    hops.append(RedirectHop(response.status, validated, True, None))
+    seen.add(validated)
+    return validated
+
+
+def _attach_redirects(exc: BaseException, hops: list[RedirectHop]) -> None:
+    exc.redirects = tuple(hops)  # type: ignore[attr-defined]
 
 
 def _validate_content_type(response: HttpResponse, policy: TransportPolicy) -> None:

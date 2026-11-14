@@ -17,3 +17,11 @@ def make_corpus(tmp_path: Path, files: dict[str, str]) -> Path:
     for relative, content in files.items():
         write_text(root / relative, content)
     return root
+
+
+def make_project(tmp_path: Path, files: dict[str, str]) -> Path:
+    root = tmp_path / "app"
+    root.mkdir()
+    for relative, content in files.items():
+        write_text(root / relative, content)
+    return root

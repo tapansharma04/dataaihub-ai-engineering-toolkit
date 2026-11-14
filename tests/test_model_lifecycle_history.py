@@ -18,6 +18,7 @@ from samyak.model.catalog import (
     build_catalog,
 )
 from samyak.model.errors import CatalogValidationError, HistorySchemaError, HistoryStoreError
+from samyak.model.export import build_model_export
 from samyak.model.facts import (
     Confidence,
     Fact,
@@ -37,11 +38,14 @@ from samyak.model.history_store import FileLifecycleHistoryStore
 from samyak.model.http import FixtureHop
 from samyak.model.identity import ModelIdentity
 from samyak.model.lifecycle import LifecycleChange, LifecycleChangeType
-from samyak.model.records import ModelRecord
+from samyak.model.records import EvidenceDisposition, ModelRecord
 from samyak.model.store import FileCatalogStore
 from samyak.model.update import (
     HISTORY_WRITE_FAILED_CODE,
     CatalogUpdateResult,
+    history_write_failure_code,
+    is_history_write_failure_code,
+    merge_provider_refresh,
     update_fireworks_catalog,
     update_openai_catalog,
 )
@@ -196,6 +200,22 @@ def test_first_lifecycle_change_is_persisted(tmp_path: Path) -> None:
     assert event.current_retirement_at is not None
     assert event.current_retirement_at.value == "2027-01-01"
     assert loaded.lifecycle_history_schema_version == HISTORY_SCHEMA_VERSION == 1
+
+
+def test_documentation_disposition_change_is_persisted_separately(tmp_path: Path) -> None:
+    store = FileLifecycleHistoryStore(root=tmp_path / "cache")
+    change = LifecycleChange(
+        change_type=LifecycleChangeType.DOCUMENTATION_CHANGED,
+        samyak_id="openai:gpt-test",
+        previous=_model(evidence_disposition=EvidenceDisposition.CURRENT_DOCUMENTED),
+        current=_model(evidence_disposition=EvidenceDisposition.NOT_OBSERVED_IN_CURRENT_CAPTURE),
+    )
+    store.append(_events_for(change))
+    event = store.load().events[0]
+    assert event.change_type is LifecycleChangeType.DOCUMENTATION_CHANGED
+    assert event.previous_evidence_disposition is EvidenceDisposition.CURRENT_DOCUMENTED
+    assert event.current_evidence_disposition is EvidenceDisposition.NOT_OBSERVED_IN_CURRENT_CAPTURE
+    assert "DOCUMENTATION EVIDENCE CHANGED" in render_lifecycle_history((event,))
 
 
 def test_repeating_identical_update_does_not_duplicate_history(tmp_path: Path) -> None:
@@ -683,7 +703,7 @@ def test_catalog_update_succeeds_when_history_write_succeeds(tmp_path: Path) -> 
     assert second.committed is True
     assert second.catalog is not None
     assert second.lifecycle_changes
-    assert all(notice.code != HISTORY_WRITE_FAILED_CODE for notice in second.notices)
+    assert all(not is_history_write_failure_code(notice.code) for notice in second.notices)
     assert second.notices == second.catalog.notices
     history = FileLifecycleHistoryStore(root=tmp_path / "cache").load()
     assert history.events
@@ -694,7 +714,7 @@ def test_catalog_update_succeeds_when_history_write_succeeds(tmp_path: Path) -> 
     )
 
 
-def test_history_write_failure_keeps_catalog_committed(
+def test_legacy_history_append_hook_cannot_split_transaction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     catalog_store = FileCatalogStore(root=tmp_path / "cache")
@@ -718,7 +738,7 @@ def test_history_write_failure_keeps_catalog_committed(
     previous_target = next(item for item in previous.models if item.samyak_id == _HISTORY_TARGET)
     assert previous_target.lifecycle.value is LifecycleState.ACTIVE
     monkeypatch.setattr(
-        "samyak.model.update.FileLifecycleHistoryStore.append",
+        "samyak.model.history_store.FileLifecycleHistoryStore.append",
         _failing_history_append,
     )
     third = update_openai_catalog(
@@ -730,21 +750,188 @@ def test_history_write_failure_keeps_catalog_committed(
     assert third.committed is True
     assert third.error is None
     assert third.catalog is not None
-    assert any(notice.code == HISTORY_WRITE_FAILED_CODE for notice in third.notices)
-    assert all(notice.code != HISTORY_WRITE_FAILED_CODE for notice in third.catalog.notices)
+    assert not any(is_history_write_failure_code(notice.code) for notice in third.notices)
     loaded = catalog_store.load()
     current = next(item for item in loaded.models if item.samyak_id == _HISTORY_TARGET)
     assert current.lifecycle.value is not LifecycleState.ACTIVE
-    assert all(notice.code != HISTORY_WRITE_FAILED_CODE for notice in loaded.notices)
     assert any(
         item.change_type is LifecycleChangeType.LIFECYCLE_CHANGED
         and item.samyak_id == _HISTORY_TARGET
         for item in third.lifecycle_changes
     )
-    assert history.load().events == before_events
+    assert len(history.load().events) > len(before_events)
+    exported = build_model_export(loaded, history.load())
+    assert "history_write_failed" not in exported.publication.reasons
 
 
-def test_history_event_construction_failure_keeps_catalog_committed(
+def test_legacy_history_append_hook_does_not_create_failure_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog_store = FileCatalogStore(root=tmp_path / "cache")
+    update_openai_catalog(
+        transport=_transport(_official_pages()),
+        store=catalog_store,
+        clock=_clock,
+    )
+    _rewrite_lifecycle(catalog_store, _HISTORY_TARGET, LifecycleState.ACTIVE)
+    original_append = FileLifecycleHistoryStore.append
+    monkeypatch.setattr(
+        "samyak.model.history_store.FileLifecycleHistoryStore.append",
+        _failing_history_append,
+    )
+    failed = update_openai_catalog(
+        transport=_transport(_official_pages()),
+        store=catalog_store,
+        clock=_clock,
+    )
+    assert failed.committed is True
+    assert not _marker_codes(catalog_store.load().notices)
+    missed = {
+        event.samyak_id for event in failed.lifecycle_changes if event.samyak_id == _HISTORY_TARGET
+    }
+    assert missed
+    monkeypatch.setattr(
+        "samyak.model.history_store.FileLifecycleHistoryStore.append",
+        original_append,
+    )
+    unchanged = update_openai_catalog(
+        transport=_transport(_official_pages()),
+        store=catalog_store,
+        clock=_clock,
+    )
+    assert unchanged.lifecycle_changes == ()
+    assert not _marker_codes(catalog_store.load().notices)
+    _rewrite_lifecycle(catalog_store, _HISTORY_TARGET, LifecycleState.ACTIVE)
+    before_ids = {
+        (event.provider_id, event.samyak_id, event.observed_at, event.change_type)
+        for event in FileLifecycleHistoryStore(root=tmp_path / "cache").load().events
+    }
+    recovered = update_openai_catalog(
+        transport=_transport(_official_pages()),
+        store=catalog_store,
+        clock=_clock,
+    )
+    assert recovered.committed is True
+    assert recovered.lifecycle_changes
+    loaded = FileCatalogStore(root=tmp_path / "cache").load()
+    assert not _marker_codes(loaded.notices)
+    history = FileLifecycleHistoryStore(root=tmp_path / "cache").load()
+    written_ids = {
+        (event.provider_id, event.samyak_id, event.observed_at, event.change_type)
+        for event in history.events
+    }
+    assert written_ids == before_ids
+    exported = build_model_export(loaded, history)
+    assert "history_write_failed" not in exported.publication.reasons
+
+
+def _marker_codes(notices: tuple[CatalogNotice, ...]) -> tuple[str, ...]:
+    return tuple(notice.code for notice in notices if is_history_write_failure_code(notice.code))
+
+
+def test_legacy_history_append_hook_never_creates_failure_markers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stamp_a = "2026-10-30T17:00:52.530312+00:00"
+    stamp_b = "2026-10-30T12:30:00.5-05:00"
+    catalog_store = FileCatalogStore(root=tmp_path / "cache")
+    update_openai_catalog(
+        transport=_transport(_official_pages()),
+        store=catalog_store,
+        clock=lambda: stamp_a,
+    )
+    original_append = FileLifecycleHistoryStore.append
+    monkeypatch.setattr(
+        "samyak.model.history_store.FileLifecycleHistoryStore.append",
+        _failing_history_append,
+    )
+    _rewrite_lifecycle(catalog_store, _HISTORY_TARGET, LifecycleState.ACTIVE)
+    first = update_openai_catalog(
+        transport=_transport(_official_pages()),
+        store=catalog_store,
+        clock=lambda: stamp_a,
+    )
+    assert first.committed is True
+    assert first.lifecycle_changes
+    assert _marker_codes(catalog_store.load().notices) == ()
+    _rewrite_lifecycle(catalog_store, _HISTORY_TARGET, LifecycleState.ACTIVE)
+    second = update_openai_catalog(
+        transport=_transport(_official_pages()),
+        store=catalog_store,
+        clock=lambda: stamp_a,
+    )
+    assert second.committed is True
+    assert second.lifecycle_changes
+    assert _marker_codes(catalog_store.load().notices) == ()
+    _rewrite_lifecycle(catalog_store, _HISTORY_TARGET, LifecycleState.ACTIVE)
+    third = update_openai_catalog(
+        transport=_transport(_official_pages()),
+        store=catalog_store,
+        clock=lambda: stamp_b,
+    )
+    assert third.committed is True
+    assert _marker_codes(catalog_store.load().notices) == ()
+    monkeypatch.setattr(
+        "samyak.model.history_store.FileLifecycleHistoryStore.append",
+        original_append,
+    )
+    _rewrite_lifecycle(catalog_store, _HISTORY_TARGET, LifecycleState.ACTIVE)
+    recovered = update_openai_catalog(
+        transport=_transport(_official_pages()),
+        store=catalog_store,
+        clock=lambda: "2026-10-31T01:02:03+00:00",
+    )
+    assert recovered.committed is True
+    assert recovered.lifecycle_changes
+    loaded = FileCatalogStore(root=tmp_path / "cache").load()
+    assert _marker_codes(loaded.notices) == ()
+    exported = build_model_export(loaded, FileLifecycleHistoryStore(root=tmp_path / "cache").load())
+    assert "history_write_failed" not in exported.publication.reasons
+
+
+def test_provider_record_replacement_keeps_history_markers() -> None:
+    stamp = "2026-10-30T17:00:52.530312+00:00"
+    other = "2026-10-30T12:30:00.5-05:00"
+    openai_marker = CatalogNotice(
+        code=history_write_failure_code("openai", stamp),
+        message="openai history was not written",
+    )
+    fireworks_marker = CatalogNotice(
+        code=history_write_failure_code("fireworks", other),
+        message="fireworks history was not written",
+    )
+    owned = CatalogNotice(code="PARTIAL_MODEL_PAGES:openai", message="OpenAI pages omitted")
+    previous = build_catalog(
+        models=(
+            _model("kimi", provider_id="fireworks"),
+            _model("gpt-test", lifecycle=_known(LifecycleState.ACTIVE)),
+        ),
+        generated_at=stamp,
+        freshness=CatalogFreshness(
+            status=FreshnessStatus.AS_OF,
+            generated_at=stamp,
+            overlay=CatalogOverlay.USER_CACHE,
+        ),
+        notices=(openai_marker, fireworks_marker, owned),
+    )
+    incoming = build_catalog(
+        models=(_model("gpt-test", lifecycle=_known(LifecycleState.DEPRECATED)),),
+        generated_at=other,
+        freshness=CatalogFreshness(
+            status=FreshnessStatus.AS_OF,
+            generated_at=other,
+            overlay=CatalogOverlay.USER_CACHE,
+        ),
+    )
+    merged = merge_provider_refresh(previous, incoming, provider_id="openai")
+    assert _marker_codes(merged.notices) == (openai_marker.code, fireworks_marker.code)
+    assert all(notice.code != owned.code for notice in merged.notices)
+    assert any(record.provider_id == "fireworks" for record in merged.models)
+    replaced = next(record for record in merged.models if record.samyak_id == "openai:gpt-test")
+    assert replaced.lifecycle.value is LifecycleState.DEPRECATED
+
+
+def test_history_event_construction_failure_keeps_pair_unchanged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     catalog_store = FileCatalogStore(root=tmp_path / "cache")
@@ -773,21 +960,16 @@ def test_history_event_construction_failure_keeps_catalog_committed(
         store=catalog_store,
         clock=_clock,
     )
-    assert result.ok is True
-    assert result.committed is True
-    assert result.error is None
-    assert result.catalog is not None
-    assert any(notice.code == HISTORY_WRITE_FAILED_CODE for notice in result.notices)
-    assert all(notice.code != HISTORY_WRITE_FAILED_CODE for notice in result.catalog.notices)
+    assert result.ok is False
+    assert result.committed is False
     loaded = catalog_store.load()
     current = next(item for item in loaded.models if item.samyak_id == _HISTORY_TARGET)
-    assert current.lifecycle.value is not LifecycleState.ACTIVE
-    assert all(notice.code != HISTORY_WRITE_FAILED_CODE for notice in loaded.notices)
-    assert catalog_store.catalog_path.read_bytes() != before_catalog
+    assert current.lifecycle.value is LifecycleState.ACTIVE
+    assert catalog_store.catalog_path.read_bytes() == before_catalog
     assert history.load().events == before_events
 
 
-def test_cli_displays_history_write_failure_warning(
+def test_cli_legacy_history_append_hook_does_not_split_update(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _patch_cli_transport(monkeypatch, _official_pages())
@@ -796,27 +978,22 @@ def test_cli_displays_history_write_failure_warning(
     catalog_store = FileCatalogStore()
     _rewrite_lifecycle(catalog_store, _HISTORY_TARGET, LifecycleState.ACTIVE)
     monkeypatch.setattr(
-        "samyak.model.update.FileLifecycleHistoryStore.append",
+        "samyak.model.history_store.FileLifecycleHistoryStore.append",
         _failing_history_append,
     )
     code = main(["model", "update", "openai"])
     captured = capsys.readouterr()
     assert code == 0
     assert "Updated OpenAI model catalog." in captured.out
-    assert "Warning: lifecycle history could not be written." in captured.out
-    assert (
-        "The model catalog was updated, but lifecycle changes were not persisted to history."
-        in captured.out
-    )
     loaded = catalog_store.load()
     current = next(item for item in loaded.models if item.samyak_id == _HISTORY_TARGET)
     assert current.lifecycle.value is not LifecycleState.ACTIVE
-    assert all(notice.code != HISTORY_WRITE_FAILED_CODE for notice in loaded.notices)
+    assert not any(is_history_write_failure_code(notice.code) for notice in loaded.notices)
     history = FileLifecycleHistoryStore()
-    assert history.exists() is False or history.load().events == ()
+    assert history.load().events
 
 
-def test_cli_displays_history_write_failure_when_event_construction_fails(
+def test_cli_event_construction_failure_leaves_catalog_unchanged(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _patch_cli_transport(monkeypatch, _official_pages())
@@ -828,15 +1005,15 @@ def test_cli_displays_history_write_failure_when_event_construction_fails(
         "samyak.model.update.history_events_from_changes",
         _failing_history_events,
     )
+    before = catalog_store.catalog_path.read_bytes()
     code = main(["model", "update", "openai"])
     captured = capsys.readouterr()
-    assert code == 0
-    assert "Updated OpenAI model catalog." in captured.out
-    assert "Warning: lifecycle history could not be written." in captured.out
+    assert code == 2
+    assert "lifecycle history samyak_id does not match provider_id" in captured.err
     loaded = catalog_store.load()
     current = next(item for item in loaded.models if item.samyak_id == _HISTORY_TARGET)
-    assert current.lifecycle.value is not LifecycleState.ACTIVE
-    assert all(notice.code != HISTORY_WRITE_FAILED_CODE for notice in loaded.notices)
+    assert current.lifecycle.value is LifecycleState.ACTIVE
+    assert catalog_store.catalog_path.read_bytes() == before
 
 
 def test_cli_history_write_warning_is_not_counted_as_catalog_notice() -> None:

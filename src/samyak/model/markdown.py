@@ -142,6 +142,36 @@ def _is_table_row(line: str) -> bool:
     return line.startswith("|") and line.endswith("|") and line.count("|") >= 2
 
 
+def unwrap_blockquote_pipe_row(line: str) -> str:
+    """Return a pipe-table row with leading blockquote markers removed.
+
+    Each marker is ``>`` plus at most one following space or tab. Nested
+    markers are removed only when the line that remains is a pipe row, so a
+    quoted sentence that merely contains ``|`` stays quoted. Cell text,
+    including a ``>`` or an escaped pipe, is left unchanged.
+    """
+    current = line
+    while True:
+        remainder = _strip_one_blockquote_marker(current)
+        if remainder is None:
+            return line
+        if _is_table_row(remainder.strip()):
+            return remainder
+        if remainder.lstrip().startswith(">"):
+            current = remainder
+            continue
+        return line
+
+
+def _strip_one_blockquote_marker(line: str) -> str | None:
+    if not line.startswith(">"):
+        return None
+    rest = line[1:]
+    if rest.startswith((" ", "\t")):
+        rest = rest[1:]
+    return rest
+
+
 def _parse_table_block(block: list[str]) -> tuple[dict[str, str], ...]:
     rows = [_split_row(line) for line in block]
     if len(rows) < 2:
@@ -167,12 +197,46 @@ def _parse_table_block(block: list[str]) -> tuple[dict[str, str], ...]:
 
 
 def _split_row(line: str) -> tuple[str, ...]:
-    inner = line.strip()
-    if inner.startswith("|"):
-        inner = inner[1:]
-    if inner.endswith("|"):
-        inner = inner[:-1]
-    return tuple(cell.strip() for cell in inner.split("|"))
+    """Split a pipe row on unescaped ``|`` delimiters.
+
+    ``\\|`` stays inside the cell. ``\\\\|`` is an escaped backslash followed
+    by a real column delimiter. A leading or trailing delimiter still produces
+    the empty edge cell that table syntax uses, and that edge cell is dropped.
+    """
+    cells = list(_split_unescaped_pipes(line.strip()))
+    if cells and cells[0] == "":
+        cells = cells[1:]
+    if cells and cells[-1] == "":
+        cells = cells[:-1]
+    return tuple(cells)
+
+
+def _split_unescaped_pipes(text: str) -> tuple[str, ...]:
+    cells: list[str] = []
+    current: list[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        nxt = text[index + 1] if index + 1 < len(text) else ""
+        if char == "\\" and nxt == "\\":
+            current.append("\\")
+            current.append("\\")
+            index += 2
+            continue
+        if char == "\\" and nxt == "|":
+            current.append("\\")
+            current.append("|")
+            index += 2
+            continue
+        if char == "|":
+            cells.append("".join(current).strip())
+            current = []
+            index += 1
+            continue
+        current.append(char)
+        index += 1
+    cells.append("".join(current).strip())
+    return tuple(cells)
 
 
 def _is_separator_cell(cell: str) -> bool:

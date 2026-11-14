@@ -28,6 +28,7 @@ from samyak.model.providers.together import (
     catalog_from_together_sources,
     parse_together_sources,
 )
+from samyak.model.providers.together.observations import TogetherLifecycle
 from samyak.model.providers.together.sources import (
     CHANGELOG_URL,
     DEPRECATIONS_URL,
@@ -236,6 +237,87 @@ def test_glm_quickstart_establishes_output_without_inferring_input() -> None:
         "glm-5.2-quickstart"
     )
     assert record.context_window.provenance.source_id == SOURCE_ID_SERVERLESS
+
+
+# Official https://docs.together.ai/docs/glm-5.3-quickstart.md
+# Retrieved 2026-11-02, HTTP 200, no redirect. Fixture bytes are the body.
+_GLM53_SHA256 = "6e667a8b120f941f5e5232490ed1c2e371ea64df81ab861a0705d19f123416e3"
+_GLM53_URL = "https://docs.together.ai/docs/glm-5.3-quickstart.md"
+
+
+def test_glm_53_quickstart_fixture_is_the_official_body() -> None:
+    payload = (FIXTURES / "glm-5.3-quickstart.md").read_bytes()
+    assert hashlib.sha256(payload).hexdigest() == _GLM53_SHA256
+    assert model_page_url("glm-5.3-quickstart") == _GLM53_URL
+    assert "zai-org/GLM-5.2" not in payload.decode("utf-8")
+
+
+def test_glm_53_table_extracts_both_ids_with_exact_casing() -> None:
+    observations = parse_together_sources((_model_page("glm-5.3-quickstart"),))
+    by_id = {item.provider_model_id: item for item in observations}
+    assert list(by_id) == ["zai-org/GLM-5.3", "zai-org/GLM-5.3-Flash"]
+    assert by_id["zai-org/GLM-5.3"].display_name == "GLM-5.3"
+    assert by_id["zai-org/GLM-5.3-Flash"].display_name == "GLM-5.3 Flash"
+    for item in observations:
+        assert item.api_access is True
+        assert item.context_window_tokens is None
+        assert item.max_input_tokens is None
+        assert item.max_output_tokens is None
+        assert item.input_modalities is None
+        assert item.output_modalities is None
+        assert item.tool_calling is None
+        assert item.structured_output is None
+        assert item.lifecycle is None
+        assert item.documented_serverless is False
+        assert item.source.source_id == model_page_source_id("glm-5.3-quickstart")
+        assert item.source.source_url == _GLM53_URL
+
+
+def test_glm_53_catalog_keeps_one_record_per_id_and_leaves_token_facts_unknown() -> None:
+    page = _model_page("glm-5.3-quickstart")
+    catalog = catalog_from_together_sources(
+        _representative_sources() + (page, page),
+        generated_at=GENERATED_AT,
+        verified_at=VERIFIED_AT,
+        overlay=CatalogOverlay.BUNDLED,
+    )
+    ids = [item.samyak_id for item in catalog.models]
+    assert ids.count("together:zai-org/GLM-5.3") == 1
+    assert ids.count("together:zai-org/GLM-5.3-Flash") == 1
+    assert ids.count("together:zai-org/GLM-5.2") == 1
+    flagship = _record("together:zai-org/GLM-5.3", catalog=catalog)
+    flash = _record("together:zai-org/GLM-5.3-Flash", catalog=catalog)
+    glm52 = _record("together:zai-org/GLM-5.2", catalog=catalog)
+    for record in (flagship, flash):
+        assert record.context_window.status is FactStatus.UNKNOWN
+        assert record.max_input_tokens.status is FactStatus.UNKNOWN
+        assert record.max_output_tokens.status is FactStatus.UNKNOWN
+        assert record.tool_calling.status is FactStatus.UNKNOWN
+        assert record.structured_output.status is FactStatus.UNKNOWN
+        assert record.input_modalities.status is FactStatus.UNKNOWN
+        assert record.lifecycle.status is FactStatus.UNKNOWN
+        assert record.api_access.value is True
+        assert record.api_access.provenance.source_id == model_page_source_id("glm-5.3-quickstart")
+    assert flagship.display_name.value == "GLM-5.3"
+    assert flash.display_name.value == "GLM-5.3 Flash"
+    assert flagship.provider_model_id == "zai-org/GLM-5.3"
+    assert flash.provider_model_id == "zai-org/GLM-5.3-Flash"
+    assert glm52.context_window.value.tokens == 512_000
+    assert glm52.max_output_tokens.value == 128_000
+    assert glm52.max_output_tokens.provenance.source_id == model_page_source_id(
+        "glm-5.2-quickstart"
+    )
+
+
+def test_prose_model_pages_still_parse_one_id() -> None:
+    glm52 = parse_together_sources((_model_page("glm-5.2-quickstart"),))
+    assert [item.provider_model_id for item in glm52] == ["zai-org/GLM-5.2"]
+    assert glm52[0].context_window_tokens == 512_000
+    assert glm52[0].max_output_tokens == 128_000
+    kimi = parse_together_sources((_model_page("kimi-k2.6-quickstart"),))
+    assert [item.provider_model_id for item in kimi] == ["moonshotai/Kimi-K2.6"]
+    assert kimi[0].context_window_tokens == 256_000
+    assert kimi[0].display_name is None
 
 
 def test_kimi_k3_quickstart_captures_explicit_input_not_output_ceiling() -> None:
@@ -481,6 +563,8 @@ def test_current_deprecation_event_wins_over_past() -> None:
     record = _record("together:togethercomputer/event-test")
     assert record.lifecycle.value is LifecycleState.DEPRECATED
     assert record.replacement.value[0].samyak_id == "together:Qwen/Qwen3.5-9B"
+    assert record.retirement_at.status is FactStatus.CONFLICT
+    assert _claim_values(record.retirement_at) == {"2026-10-01", "2025-01-01"}
 
 
 def test_ambiguous_lifecycle_replacements_are_conflicts() -> None:
@@ -535,6 +619,217 @@ def test_provenance_and_content_hash() -> None:
     redirect = _record("together:deepseek-ai/DeepSeek-V3")
     assert redirect.replacement.provenance.source_id == SOURCE_ID_DEPRECATIONS
     assert redirect.replacement.provenance.source_kind is SourceKind.PROVIDER_DEPRECATIONS
+
+
+def _claim_values(fact) -> set[object]:
+    return {claim.value for claim in fact.claims}
+
+
+def _october_retirement_sources():
+    return (
+        _source(SOURCE_ID_DEPRECATIONS, "deprecations-removal-conflict.md", DEPRECATIONS_URL),
+        _source(SOURCE_ID_CHANGELOG, "changelog-datelines.md", CHANGELOG_URL),
+    )
+
+
+def _october_observations():
+    return parse_together_sources(_october_retirement_sources())
+
+
+def _changelog_retirement(model_id: str) -> set[str | None]:
+    return {
+        item.retirement_at
+        for item in _october_observations()
+        if item.provider_model_id == model_id and item.source.source_id == SOURCE_ID_CHANGELOG
+    }
+
+
+def test_no_longer_available_dateline_is_not_a_retirement_date() -> None:
+    kimi = [
+        item
+        for item in _october_observations()
+        if item.provider_model_id == "moonshotai/Kimi-K2.6"
+        and item.source.source_id == SOURCE_ID_CHANGELOG
+    ]
+    assert kimi[0].lifecycle is TogetherLifecycle.RETIRED
+    assert _changelog_retirement("moonshotai/Kimi-K2.6") == {None}
+    assert _changelog_retirement("black-forest-labs/FLUX.1-schnell") == {None}
+    assert _changelog_retirement("Qwen/Qwen2.5-7B") == {None}
+    catalog = _catalog(sources=_october_retirement_sources())
+    record = _record("together:moonshotai/Kimi-K2.6", catalog=catalog)
+    assert record.lifecycle.value is LifecycleState.RETIRED
+    assert record.retirement_at.status is FactStatus.KNOWN
+    assert record.retirement_at.value == "2026-08-19"
+    assert record.retirement_at.provenance.source_id == SOURCE_ID_DEPRECATIONS
+
+
+def test_explicit_removal_sentence_ignores_later_dateline() -> None:
+    for model_id in (
+        "openai/gpt-oss-20b",
+        "google/gemma-4-31B-it",
+        "thinkingmachines/Inkling-Small",
+        "intfloat/multilingual-e5-large-instruct",
+    ):
+        assert _changelog_retirement(model_id) == {"2026-09-14"}
+    observations = [
+        item
+        for item in _october_observations()
+        if item.provider_model_id == "openai/gpt-oss-20b"
+        and item.source.source_id == SOURCE_ID_CHANGELOG
+    ]
+    assert observations[0].replacements == ("Qwen/Qwen3.5-9B",)
+    assert observations[0].lifecycle is TogetherLifecycle.DEPRECATED
+
+
+def test_section_dateline_is_not_copied_onto_every_bullet() -> None:
+    assert _changelog_retirement("Qwen/Qwen2-72B") == {None}
+    assert _changelog_retirement("Qwen/Qwen2-VL-72B-Instruct") == {None}
+    assert "2026-08-18" not in _changelog_retirement("moonshotai/Kimi-K2.6")
+    assert "2026-07-28" not in _changelog_retirement("Qwen/Qwen2-72B-Instruct")
+    assert "2026-08-31" not in _changelog_retirement("google/gemma-4-31B-it")
+
+
+def test_repeated_changelog_sections_do_not_conflict_on_datelines() -> None:
+    assert _changelog_retirement("Qwen/Qwen2-72B-Instruct") == {None}
+    catalog = _catalog(sources=_october_retirement_sources())
+    record = _record("together:Qwen/Qwen2-72B-Instruct", catalog=catalog)
+    assert "2026-07-28" not in _claim_values(record.retirement_at)
+    assert "2025-08-19" not in _claim_values(record.retirement_at)
+
+
+def test_scheduled_and_history_removal_dates_stay_in_conflict() -> None:
+    catalog = _catalog(sources=_october_retirement_sources())
+    for model_id in (
+        "openai/gpt-oss-20b",
+        "google/gemma-4-31B-it",
+        "thinkingmachines/Inkling-Small",
+        "intfloat/multilingual-e5-large-instruct",
+    ):
+        record = _record(f"together:{model_id}", catalog=catalog)
+        assert record.retirement_at.status is FactStatus.CONFLICT
+        assert _claim_values(record.retirement_at) == {"2026-09-14", "2026-09-15"}
+        assert {claim.provenance.source_id for claim in record.retirement_at.claims} == {
+            SOURCE_ID_DEPRECATIONS
+        }
+    scheduled = _record("together:openai/gpt-oss-20b", catalog=catalog)
+    assert scheduled.lifecycle.value is LifecycleState.DEPRECATED
+    assert scheduled.replacement.value[0].provider_model_id == "Qwen/Qwen3.5-9B"
+    assert scheduled.replacement.provenance.source_id == SOURCE_ID_DEPRECATIONS
+
+
+def test_qwen2_72b_service_removal_dates_stay_in_conflict() -> None:
+    """Fine-tuning and inference removal dates are different services.
+
+    The catalog has one retirement fact and no service scope, so both labelled
+    dates remain a conflict. Neither date is discarded.
+    """
+    catalog = _catalog(sources=_october_retirement_sources())
+    record = _record("together:Qwen/Qwen2-72B-Instruct", catalog=catalog)
+    assert record.lifecycle.value is LifecycleState.RETIRED
+    assert record.retirement_at.status is FactStatus.CONFLICT
+    assert _claim_values(record.retirement_at) == {"2026-07-29", "2025-08-28"}
+    assert {claim.provenance.source_id for claim in record.retirement_at.claims} == {
+        SOURCE_ID_DEPRECATIONS
+    }
+
+
+def _scheduled_unavailable_changelog():
+    return (_source(SOURCE_ID_CHANGELOG, "changelog-scheduled-unavailable.md", CHANGELOG_URL),)
+
+
+def _qwen397_sources():
+    return _scheduled_unavailable_changelog() + (
+        _source(SOURCE_ID_DEPRECATIONS, "deprecations-qwen397.md", DEPRECATIONS_URL),
+    )
+
+
+def _changelog_observations(sources, model_id: str):
+    return tuple(
+        item
+        for item in parse_together_sources(sources)
+        if item.provider_model_id == model_id and item.source.source_id == SOURCE_ID_CHANGELOG
+    )
+
+
+def test_scheduled_unavailability_before_end_date_stays_deprecated() -> None:
+    sources = _scheduled_unavailable_changelog()
+    observation = _changelog_observations(sources, "togethercomputer/available-after-date")[0]
+    assert observation.lifecycle is TogetherLifecycle.DEPRECATED
+    assert observation.retirement_at == "2026-06-29"
+    catalog = _catalog(verified_at="2026-06-28T00:00:00+00:00", sources=sources)
+    record = _record("together:togethercomputer/available-after-date", catalog=catalog)
+    assert record.lifecycle.value is LifecycleState.DEPRECATED
+    assert record.retirement_at.status is FactStatus.KNOWN
+    assert record.retirement_at.value == "2026-06-29"
+
+
+def test_scheduled_unavailability_on_end_date_is_retired() -> None:
+    catalog = _catalog(
+        verified_at="2026-06-29T00:00:00+00:00",
+        sources=_scheduled_unavailable_changelog(),
+    )
+    record = _record("together:togethercomputer/available-after-date", catalog=catalog)
+    assert record.lifecycle.value is LifecycleState.RETIRED
+    assert record.retirement_at.status is FactStatus.KNOWN
+    assert record.retirement_at.value == "2026-06-29"
+
+
+def test_scheduled_unavailability_on_date_ignores_dateline() -> None:
+    sources = _scheduled_unavailable_changelog()
+    observation = _changelog_observations(sources, "togethercomputer/available-on-date")[0]
+    assert observation.lifecycle is TogetherLifecycle.DEPRECATED
+    assert observation.retirement_at == "2026-08-02"
+    catalog = _catalog(verified_at="2026-08-01T00:00:00+00:00", sources=sources)
+    record = _record("together:togethercomputer/available-on-date", catalog=catalog)
+    assert record.lifecycle.value is LifecycleState.DEPRECATED
+    assert record.retirement_at.value == "2026-08-02"
+
+
+def test_scheduled_unavailability_without_a_date_does_not_invent_one() -> None:
+    sources = _scheduled_unavailable_changelog()
+    observation = _changelog_observations(sources, "togethercomputer/unavailable-without-date")[0]
+    assert observation.lifecycle is TogetherLifecycle.DEPRECATED
+    assert observation.retirement_at is None
+    catalog = _catalog(verified_at="2026-10-30T00:00:00+00:00", sources=sources)
+    record = _record("together:togethercomputer/unavailable-without-date", catalog=catalog)
+    assert record.lifecycle.value is LifecycleState.DEPRECATED
+    assert record.retirement_at.status is not FactStatus.KNOWN
+    assert record.retirement_at.value != "2026-05-02"
+
+
+def test_multiple_explicit_end_dates_stay_ambiguous() -> None:
+    observation = _changelog_observations(
+        _scheduled_unavailable_changelog(),
+        "togethercomputer/ambiguous-end-date",
+    )[0]
+    assert observation.lifecycle is TogetherLifecycle.DEPRECATED
+    assert observation.retirement_at is None
+
+
+def test_no_longer_available_section_stays_retired_without_a_date() -> None:
+    observation = _changelog_observations(
+        _scheduled_unavailable_changelog(),
+        "togethercomputer/already-unavailable",
+    )[0]
+    assert observation.lifecycle is TogetherLifecycle.RETIRED
+    assert observation.retirement_at is None
+
+
+def test_qwen35_397b_sections_agree_once_the_end_date_is_kept() -> None:
+    sources = _qwen397_sources()
+    observations = _changelog_observations(sources, "Qwen/Qwen3.5-397B-A17B")
+    by_lifecycle = {item.lifecycle: item for item in observations}
+    assert by_lifecycle[TogetherLifecycle.RETIRED].retirement_at is None
+    scheduled = by_lifecycle[TogetherLifecycle.DEPRECATED]
+    assert scheduled.retirement_at == "2026-06-29"
+    assert scheduled.replacements == ("MiniMaxAI/MiniMax-M3",)
+    catalog = _catalog(verified_at="2026-10-30T17:00:52.530312+00:00", sources=sources)
+    record = _record("together:Qwen/Qwen3.5-397B-A17B", catalog=catalog)
+    assert record.lifecycle.status is FactStatus.KNOWN
+    assert record.lifecycle.value is LifecycleState.RETIRED
+    assert record.retirement_at.status is FactStatus.KNOWN
+    assert record.retirement_at.value == "2026-06-29"
+    assert record.replacement.value[0].provider_model_id == "MiniMaxAI/MiniMax-M3"
 
 
 def test_freshness_and_round_trip() -> None:

@@ -17,7 +17,9 @@ from samyak.model.http import (
     HttpTransport,
     TransportError,
     TransportPolicy,
+    reraise_fetch,
     user_agent,
+    with_redirect_rejection,
 )
 from samyak.model.providers.openai.adapter import catalog_from_openai_sources
 from samyak.model.providers.openai.errors import (
@@ -29,6 +31,7 @@ from samyak.model.providers.openai.parse import parse_openai_sources
 from samyak.model.providers.openai.sources import (
     DOCS_HOST,
     DOCS_PATH_PREFIX,
+    PROVIDER_ID,
     CapturedSource,
     OpenAISourceDescriptor,
     OpenAISourceType,
@@ -37,6 +40,12 @@ from samyak.model.providers.openai.sources import (
     model_page_descriptor,
     model_page_source_id_from_url,
     required_source_descriptors,
+)
+from samyak.model.source_archive import (
+    SourceArchive,
+    note_captured,
+    note_failure,
+    note_parse_failure,
 )
 
 _NOTICE_PARTIAL = "PARTIAL_MODEL_PAGES"
@@ -87,12 +96,15 @@ def capture_openai_source(
     try:
         response = transport.get(descriptor.url)
     except TransportError as exc:
-        raise OpenAIFetchError(str(exc)) from exc
+        reraise_fetch(OpenAIFetchError, exc)
     if response.status < 200 or response.status >= 300:
         raise OpenAIFetchError(
             f"OpenAI documentation {descriptor.source_id} returned HTTP {response.status}"
         )
-    _assert_final_document(descriptor, response.final_url)
+    try:
+        _assert_final_document(descriptor, response.final_url)
+    except OpenAIFetchError as exc:
+        raise with_redirect_rejection(exc, response) from None
     try:
         body = response.body.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -101,8 +113,11 @@ def capture_openai_source(
     if descriptor.source_type is OpenAISourceType.MODEL_PAGE:
         source_id = model_page_source_id_from_url(response.final_url)
         if source_id != descriptor.source_id:
-            raise OpenAIFetchError(
-                "OpenAI model page redirected to a different documentation document"
+            raise with_redirect_rejection(
+                OpenAIFetchError(
+                    "OpenAI model page redirected to a different documentation document"
+                ),
+                response,
             )
     return captured_markdown(
         source_id=source_id,
@@ -118,6 +133,7 @@ def refresh_openai_catalog(
     generated_at: str,
     verified_at: str,
     overlay: CatalogOverlay = CatalogOverlay.USER_CACHE,
+    diagnostics: SourceArchive | None = None,
 ) -> OpenAIRefreshResult:
     """Fetch official sources and build a catalog in memory.
 
@@ -128,9 +144,20 @@ def refresh_openai_catalog(
     captured: list[CapturedSource] = []
     try:
         for descriptor in required_source_descriptors():
-            captured.append(capture_openai_source(transport, descriptor))
+            try:
+                source = capture_openai_source(transport, descriptor)
+            except (OpenAIFetchError, TransportError) as exc:
+                note_failure(diagnostics, PROVIDER_ID, descriptor.source_id, descriptor.url, exc)
+                raise
+            note_captured(diagnostics, PROVIDER_ID, source)
+            captured.append(source)
         parse_openai_sources(tuple(captured))
-    except (OpenAIFetchError, OpenAIParseError, OpenAIAdapterError, TransportError) as exc:
+    except (OpenAIFetchError, TransportError) as exc:
+        return OpenAIRefreshResult(
+            ok=False, catalog=None, error=str(exc), notices=(), partial=False
+        )
+    except (OpenAIParseError, OpenAIAdapterError) as exc:
+        note_parse_failure(diagnostics, PROVIDER_ID, captured, exc)
         return OpenAIRefreshResult(
             ok=False, catalog=None, error=str(exc), notices=(), partial=False
         )
@@ -150,11 +177,19 @@ def refresh_openai_catalog(
         descriptor = model_page_descriptor(page_id)
         try:
             page = capture_openai_source(transport, descriptor)
-            parse_openai_sources((page,))
-        except (OpenAIFetchError, TransportError):
+        except (OpenAIFetchError, TransportError) as exc:
+            note_failure(diagnostics, PROVIDER_ID, descriptor.source_id, descriptor.url, exc)
             notices.append(_detail_failure_notice(descriptor, parsed=False))
             continue
-        except (OpenAIParseError, OpenAIAdapterError):
+        note_captured(diagnostics, PROVIDER_ID, page)
+        try:
+            parse_openai_sources((page,))
+        except (OpenAIFetchError, TransportError) as exc:
+            note_failure(diagnostics, PROVIDER_ID, descriptor.source_id, descriptor.url, exc)
+            notices.append(_detail_failure_notice(descriptor, parsed=False))
+            continue
+        except (OpenAIParseError, OpenAIAdapterError) as exc:
+            note_failure(diagnostics, PROVIDER_ID, descriptor.source_id, descriptor.url, exc)
             notices.append(_detail_failure_notice(descriptor, parsed=True))
             continue
         captured.append(page)
@@ -181,6 +216,7 @@ def refresh_openai_catalog(
             notices=tuple(notices),
         )
     except (OpenAIParseError, OpenAIAdapterError) as exc:
+        note_parse_failure(diagnostics, PROVIDER_ID, captured, exc)
         return OpenAIRefreshResult(
             ok=False,
             catalog=None,

@@ -19,6 +19,7 @@ from samyak.model.records import RECORD_FACT_NAMES, ModelRecord
 from samyak.server.layout import escape_html as _e
 from samyak.server.layout import format_timestamp, render_page
 from samyak.server.model_catalog import (
+    evidence_disposition_html,
     format_token_count,
     lifecycle_html,
     model_href,
@@ -105,6 +106,7 @@ def render_model_detail(catalog: ModelCatalog, record: ModelRecord) -> str:
             "<h2>Identity</h2>",
             _dl(
                 [
+                    ("Documentation status", evidence_disposition_html(record)),
                     ("Serving source", _e(_provider_label(record.provider_id))),
                     ("Provider model ID", f"<code>{_e(record.provider_model_id)}</code>"),
                     ("Kind", _e(record.identity_kind.value)),
