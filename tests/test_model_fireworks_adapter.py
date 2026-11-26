@@ -38,7 +38,6 @@ from samyak.model.providers.fireworks.observations import (
 from samyak.model.providers.fireworks.sources import (
     CHANGELOG_URL,
     EMBEDDINGS_URL,
-    KIMI_K2_URL,
     SERVING_PATHS_URL,
     TEXT_MODELS_URL,
     TOOL_CALLING_URL,
@@ -86,7 +85,8 @@ def _representative_sources():
         _source(SOURCE_ID_TEXT_MODELS, "text-models.md", TEXT_MODELS_URL),
         _source(SOURCE_ID_VISION_MODELS, "vision-models.md", VISION_MODELS_URL),
         _source(SOURCE_ID_TOOL_CALLING, "tool-calling.md", TOOL_CALLING_URL),
-        _model_page("kimi-k2.md", KIMI_K2_URL),
+        # Historical parser fixture, not a configured acquisition descriptor.
+        _model_page("kimi-k2.md", model_page_url("kimi-k2")),
     )
 
 

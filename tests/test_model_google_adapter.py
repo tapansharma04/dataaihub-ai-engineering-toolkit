@@ -40,6 +40,7 @@ from samyak.model.providers.google.sources import (
     content_hash_for_bytes,
     model_page_url,
 )
+from samyak.model.records import EvidenceDisposition
 from samyak.model.serialize import catalog_from_json, catalog_to_json
 
 FIXTURES = Path(__file__).parent / "fixtures" / "models" / "google"
@@ -103,6 +104,259 @@ def _record(samyak_id: str):
     matches = [item for item in catalog.models if item.samyak_id == samyak_id]
     assert matches, f"missing {samyak_id}"
     return matches[0]
+
+
+def _aistudio_sources():
+    return (
+        _source(SOURCE_ID_MODELS_INDEX, "aistudio-models.md", MODELS_INDEX_URL),
+        _source(SOURCE_ID_DEPRECATIONS, "aistudio-deprecations.md", DEPRECATIONS_URL),
+        _model_page(
+            "models/aistudio-gemini-3.1-flash-lite.md",
+            model_page_url("gemini-3.1-flash-lite"),
+        ),
+        _model_page(
+            "models/aistudio-gemini-3.1-pro-preview.md",
+            model_page_url("gemini-3.1-pro-preview"),
+        ),
+        _model_page(
+            "models/aistudio-gemini-3-flash-preview.md",
+            model_page_url("gemini-3-flash-preview"),
+        ),
+    )
+
+
+def test_current_ai_studio_directive_documents_extract_exact_ids_and_token_limits() -> None:
+    catalog = catalog_from_google_sources(
+        _aistudio_sources(),
+        generated_at=GENERATED_AT,
+        verified_at=VERIFIED_AT,
+        overlay=CatalogOverlay.BUNDLED,
+    )
+    lite = next(item for item in catalog.models if item.samyak_id == "google:gemini-3.1-flash-lite")
+    pro = next(item for item in catalog.models if item.samyak_id == "google:gemini-3.1-pro-preview")
+    flash = next(
+        item for item in catalog.models if item.samyak_id == "google:gemini-3-flash-preview"
+    )
+    historical = next(
+        item for item in catalog.models if item.samyak_id == "google:gemini-3.1-flash-image-preview"
+    )
+    assert lite.max_input_tokens.value == 1_048_576
+    assert lite.max_output_tokens.value == 65_536
+    assert lite.tool_calling.value is True
+    assert pro.tool_calling.value is True
+    assert pro.structured_output.value is True
+    assert flash.max_output_tokens.value == 65_536
+    assert historical.evidence_disposition is EvidenceDisposition.HISTORICAL_REFERENCE_ONLY
+    assert historical.lifecycle.value is LifecycleState.RETIRED
+    assert historical.replacement.value[0].samyak_id == "google:gemini-nano-banana-2.1"
+    assert historical.max_input_tokens.status is FactStatus.NOT_VERIFIED
+
+
+def test_directive_tables_require_complete_bullet_rows() -> None:
+    malformed = """# Models
+{% table %}
+* Model
+* Endpoint
+---
+* [Gemini](/docs/models/gemini)
+{% /table %}
+"""
+    with pytest.raises(GoogleParseError, match="directive table"):
+        parse_google_sources(
+            (
+                captured_markdown(
+                    source_id=SOURCE_ID_MODELS_INDEX,
+                    source_url=MODELS_INDEX_URL,
+                    body=malformed,
+                    retrieved_at=RETRIEVED_AT,
+                ),
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    (
+        "gemini-4-carbon",
+        "gemini-4-neon",
+        "gemini-4-hydrogen",
+        "gemini-4-argon",
+    ),
+)
+def test_conditional_output_limits_preserve_unified_context_without_fabricating_scalar(
+    model_id: str,
+) -> None:
+    """Faithful 2026-11-24 AI Studio excerpt for each archived Gemini 4 page."""
+    body = (
+        (FIXTURES / "models" / "aistudio-gemini-4-conditional.md")
+        .read_text(encoding="utf-8")
+        .replace("{{model_id}}", model_id)
+    )
+    source = captured_markdown(
+        source_id=model_page_source_id_from_url(model_page_url(model_id)),
+        source_url=model_page_url(model_id),
+        body=body,
+        retrieved_at="2026-11-24T06:59:01+00:00",
+    )
+    catalog = catalog_from_google_sources(
+        (source,),
+        generated_at=GENERATED_AT,
+        verified_at=VERIFIED_AT,
+        overlay=CatalogOverlay.BUNDLED,
+    )
+    record = catalog.models[0]
+    assert record.context_window.value is not None
+    assert record.context_window.value.tokens == 1_048_576
+    assert record.context_window.value.kind is ContextWindowKind.COMBINED
+    assert record.max_input_tokens.status is FactStatus.UNKNOWN
+    assert record.max_output_tokens.status is FactStatus.NOT_VERIFIED
+    assert record.tool_calling.value is True
+    assert record.structured_output.value is True
+
+
+def test_malformed_conditional_output_limit_still_fails_closed() -> None:
+    body = (
+        (FIXTURES / "models" / "aistudio-gemini-4-conditional.md")
+        .read_text(encoding="utf-8")
+        .replace("{{model_id}}", "gemini-conditional-invalid")
+    )
+    body = body.replace("(with [long decode](/docs/long-decode))", "(conditional)")
+    with pytest.raises(GoogleParseError, match="unparseable output token limit"):
+        parse_google_sources(
+            (
+                captured_markdown(
+                    source_id=model_page_source_id_from_url(
+                        model_page_url("gemini-conditional-invalid")
+                    ),
+                    source_url=model_page_url("gemini-conditional-invalid"),
+                    body=body,
+                    retrieved_at=RETRIEVED_AT,
+                ),
+            )
+        )
+
+
+def test_decision_directive_table_bold_content_and_zero_output_are_recognized() -> None:
+    catalog = catalog_from_google_sources(
+        (
+            _model_page(
+                "models/aistudio-gemini-decision-1.md",
+                model_page_url("gemini-decision-1"),
+            ),
+        ),
+        generated_at=GENERATED_AT,
+        verified_at=VERIFIED_AT,
+        overlay=CatalogOverlay.BUNDLED,
+    )
+    record = catalog.models[0]
+    assert record.max_input_tokens.value == 262_144
+    assert record.max_output_tokens.status is FactStatus.NOT_VERIFIED
+    assert record.input_modalities.value == (
+        Modality.TEXT,
+        Modality.IMAGE,
+        Modality.VIDEO,
+        Modality.AUDIO,
+    )
+    assert record.output_modalities.status is FactStatus.UNKNOWN
+    assert record.tool_calling.status is FactStatus.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "table, message",
+    (
+        ("{% table %}\n* Model\n* Endpoint\n", "closing tag"),
+        (
+            "{% table %}\n* Model\n* Model\n---\n* A\n* `gemini-a`\n{% /table %}",
+            "malformed",
+        ),
+        (
+            "{% table %}\nunexpected\n* Model\n* Endpoint\n---\n* A\n* `gemini-a`\n{% /table %}",
+            "malformed",
+        ),
+        (
+            "{% table %}\n---\n* Model\n* Endpoint\n---\n* A\n* `gemini-a`\n{% /table %}",
+            "malformed",
+        ),
+        (
+            "{% table %}\n* Model\n* Endpoint\n{% table %}\n{% /table %}\n{% /table %}",
+            "nested table",
+        ),
+    ),
+)
+def test_directive_tables_reject_ambiguous_or_malformed_grammar(table: str, message: str) -> None:
+    with pytest.raises(GoogleParseError, match=message):
+        parse_google_sources(
+            (
+                captured_markdown(
+                    source_id=SOURCE_ID_MODELS_INDEX,
+                    source_url=MODELS_INDEX_URL,
+                    body=f"# Models\n{table}\n",
+                    retrieved_at=RETRIEVED_AT,
+                ),
+            )
+        )
+
+
+def test_deprecation_retirement_scope_does_not_leak_to_current_or_sibling_tables() -> None:
+    body = """# Gemini deprecations
+Already-shutdown models are listed under the **Deprecated models** sections.
+## Family one models
+| Model | Shutdown date | Recommended replacement |
+|---|---|---|
+| `gemini-current` | December 1, 2027 | `gemini-next` |
+### Deprecated models
+| Model | Shutdown date | Recommended replacement |
+|---|---|---|
+| `gemini-retired` | June 1, 2026 | `gemini-next` |
+### Upcoming deprecations
+| Model | Shutdown date | Recommended replacement |
+|---|---|---|
+| `gemini-upcoming` | December 1, 2027 | `gemini-next` |
+## Family two models
+| Model | Shutdown date | Recommended replacement |
+|---|---|---|
+| `gemini-sibling` | December 1, 2027 | `gemini-next` |
+"""
+    catalog = catalog_from_google_sources(
+        (
+            captured_markdown(
+                source_id=SOURCE_ID_DEPRECATIONS,
+                source_url=DEPRECATIONS_URL,
+                body=body,
+                retrieved_at=RETRIEVED_AT,
+            ),
+        ),
+        generated_at=GENERATED_AT,
+        verified_at=VERIFIED_AT,
+        overlay=CatalogOverlay.BUNDLED,
+    )
+    states = {item.provider_model_id: item.lifecycle.status for item in catalog.models}
+    retired = next(item for item in catalog.models if item.provider_model_id == "gemini-retired")
+    assert retired.lifecycle.value is LifecycleState.RETIRED
+    assert states["gemini-current"] is FactStatus.UNKNOWN
+    assert states["gemini-upcoming"] is FactStatus.UNKNOWN
+    assert states["gemini-sibling"] is FactStatus.UNKNOWN
+
+
+def test_model_page_rejects_recognized_but_unparseable_token_limit() -> None:
+    body = """# Gemini test
+## gemini-test
+| Property | Description |
+|---|---|
+| Model code | `gemini-test` |
+| Token limits | **Input token limit** many tokens |
+"""
+    with pytest.raises(GoogleParseError, match="unparseable input token limit"):
+        parse_google_sources(
+            (
+                captured_markdown(
+                    source_id=model_page_source_id_from_url(model_page_url("gemini-test")),
+                    source_url=model_page_url("gemini-test"),
+                    body=body,
+                    retrieved_at=RETRIEVED_AT,
+                ),
+            )
+        )
 
 
 def test_current_model_identity_and_normalization() -> None:
@@ -367,10 +621,18 @@ def test_previous_models_section_is_not_lifecycle_or_api_access_evidence() -> No
 
 def test_deprecations_only_id_does_not_invent_lifecycle() -> None:
     record = _record("google:gemini-old-preview")
+    assert record.evidence_disposition is EvidenceDisposition.HISTORICAL_REFERENCE_ONLY
     assert record.lifecycle.status is FactStatus.UNKNOWN
     assert record.retirement_at.status is FactStatus.UNKNOWN
     assert record.replacement.value[0].samyak_id == "google:gemini-3.1-pro-preview"
+    assert record.context_window.status is FactStatus.NOT_VERIFIED
+    assert record.max_input_tokens.status is FactStatus.NOT_VERIFIED
     assert record.api_access.status is FactStatus.NOT_VERIFIED
+
+
+def test_currently_documented_id_is_not_historical_when_also_deprecated() -> None:
+    record = _record("google:imagen-4.0-generate-001")
+    assert record.evidence_disposition is EvidenceDisposition.CURRENT_DOCUMENTED
 
 
 def test_vertex_replacement_is_not_copied_as_a_google_identity() -> None:

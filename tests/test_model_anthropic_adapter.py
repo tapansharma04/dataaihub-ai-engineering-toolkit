@@ -281,6 +281,25 @@ def test_malformed_overview_fails_closed() -> None:
         )
 
 
+def test_latest_models_comparison_table_is_accepted() -> None:
+    observations = parse_anthropic_sources(
+        (_source(SOURCE_ID_MODELS_INDEX, "overview-latest-models.md", MODELS_INDEX_URL),)
+    )
+    assert {item.provider_model_id for item in observations if item.listed_on_index} == {
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+    }
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    ("overview-latest-missing-feature.md", "overview-latest-missing-api-id.md"),
+)
+def test_latest_models_without_comparison_evidence_fails_closed(fixture: str) -> None:
+    with pytest.raises(AnthropicParseError, match="did not list any Claude API models"):
+        parse_anthropic_sources((_source(SOURCE_ID_MODELS_INDEX, fixture, MODELS_INDEX_URL),))
+
+
 def test_missing_model_id_fails_page() -> None:
     with pytest.raises(AnthropicParseError, match="Model ID"):
         parse_anthropic_sources(

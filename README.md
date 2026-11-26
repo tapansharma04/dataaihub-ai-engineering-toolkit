@@ -18,7 +18,7 @@ Corpus Intelligence inspects a local document directory, collects evidence, expl
 
 Keep a local catalog of provider-documented API models, verified from official documentation rather than guessed from marketing pages or live API probes.
 
-v0.4.0 covers these serving sources: **anthropic**, **fireworks**, **google**, **openai**, and **together**. Refresh one provider, or refresh all of them sequentially with `samyak model update all`. Other providers' records stay in the overlay.
+v0.4.1 covers these serving sources: **anthropic**, **fireworks**, **google**, **openai**, and **together**. Refresh one provider, or refresh all of them sequentially with `samyak model update all`. Other providers' records stay in the overlay.
 
 ```bash
 samyak model update openai
@@ -72,7 +72,7 @@ workspace horizontally to inspect all selected columns.
 - Data engineers validating knowledge-base handoffs
 - Platform and QA teams adding corpus checks to local workflows or CI
 
-## Features (v0.4.0)
+## Features (v0.4.1)
 
 - Corpus inventory (supported / unsupported / analyzed, by format)
 - Empty and whitespace-only document detection
@@ -334,13 +334,16 @@ not refresh or modify either local file.
 samyak model export > model-export.json
 samyak model export --output model-export.json
 samyak model export --require-complete --output model-export.json
+samyak model export --require-publishable --output model-export.json
 ```
 
 JSON is the only export format. Without `--output`, JSON is written to stdout;
 with `--output`, the destination is overwritten, except that Samyak refuses to
 replace its catalog or lifecycle-history files. `--require-complete` exits with
 status 2 and writes nothing when the snapshot is not complete enough for
-publication.
+publication. `--require-publishable` permits degraded optional-source coverage
+only when publication integrity remains publishable; `--require-complete`
+retains its stricter complete-coverage behavior.
 
 The wrapper has a versioned contract (`export_schema_version`), carries the
 catalog's documentation dispositions and fact provenance, and preserves
@@ -394,7 +397,7 @@ Samyak Corpus Intelligence Report
 
 Product:                  samyak
 Capability:               corpus
-Version:                  0.4.0
+Version:                  0.4.1
 
 Corpus
 ------
@@ -438,7 +441,7 @@ Example identity fields:
 {
   "product": "samyak",
   "capability": "corpus",
-  "version": "0.4.0"
+  "version": "0.4.1"
 }
 ```
 
@@ -521,6 +524,7 @@ Controlled detection validation covers empty documents, exact duplicates, size o
 - Model Intelligence currently covers official Anthropic, Fireworks, Google (Gemini API), OpenAI, and Together documentation — not partner platforms, other serving sources, pricing, or recommendations
 - Model facts are taken from captured documentation, not from probing provider APIs
 - A provider refresh replaces that provider's records; it does not invent missing detail-page facts when a model page cannot be retrieved
+- In the 0.4.1 compatibility update, Together's discontinued GLM 5.2 and Kimi K2.6 quickstarts are no longer acquired. A later refresh can therefore leave specifications that existed only in those documents as `not_verified`; Samyak retains remaining inventory and lifecycle evidence and never copies replacement-model specifications.
 
 ## Samyak by DataAIHub
 

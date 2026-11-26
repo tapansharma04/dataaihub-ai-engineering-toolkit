@@ -52,7 +52,12 @@ from samyak.model.errors import (
     HistorySchemaError,
     HistoryStoreError,
 )
-from samyak.model.export import PublicationStatus, build_model_export, model_export_to_json
+from samyak.model.export import (
+    PublicationIntegrityStatus,
+    PublicationStatus,
+    build_model_export,
+    model_export_to_json,
+)
 from samyak.model.facts import (
     ContextWindow,
     ContextWindowKind,
@@ -425,6 +430,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Exit with status 2 and do not write the export when the snapshot "
             "is not publishable as complete"
+        ),
+    )
+    export.add_argument(
+        "--require-publishable",
+        action="store_true",
+        help=(
+            "Exit with status 2 and do not write the export when publication "
+            "integrity is blocked; degraded optional-source coverage is allowed"
         ),
     )
     export.set_defaults(handler=_run_model_export)
@@ -1143,6 +1156,14 @@ def _run_model_export(args: argparse.Namespace) -> int:
     if args.require_complete and export.publication.status is not PublicationStatus.COMPLETE:
         print("error: model export is incomplete", file=sys.stderr)
         for reason in export.publication.reasons:
+            print(reason, file=sys.stderr)
+        return 2
+    if (
+        args.require_publishable
+        and export.publication.integrity_status is not PublicationIntegrityStatus.PUBLISHABLE
+    ):
+        print("error: model export is not publishable", file=sys.stderr)
+        for reason in export.publication.blocking_reasons:
             print(reason, file=sys.stderr)
         return 2
 

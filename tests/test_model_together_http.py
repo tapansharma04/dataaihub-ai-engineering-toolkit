@@ -158,12 +158,12 @@ def test_refresh_serverless_catalogue_without_marking_partial() -> None:
     glm = next(
         item for item in result.catalog.models if item.samyak_id == "together:zai-org/GLM-5.2"
     )
-    assert glm.max_output_tokens.value == 128_000
+    assert glm.max_output_tokens.status is FactStatus.UNKNOWN
 
 
 def test_refresh_partial_when_optional_model_page_missing() -> None:
     pages = _official_pages()
-    del pages[model_page_url("glm-5.2-quickstart")]
+    del pages[model_page_url("glm-5.3-quickstart")]
     result = refresh_together_catalog(
         _transport(pages),
         generated_at=STAMP,
@@ -173,13 +173,13 @@ def test_refresh_partial_when_optional_model_page_missing() -> None:
     assert result.partial is True
     codes = {notice.code for notice in result.notices}
     assert "PARTIAL_MODEL_PAGES:together" in codes
-    assert "SOURCE_FETCH_FAILED:together-docs-model-page:glm-5.2-quickstart" in codes
+    assert "SOURCE_FETCH_FAILED:together-docs-model-page:glm-5.3-quickstart" in codes
 
 
-def test_glm_53_page_does_not_clear_glm_52_failure_or_partial_notice() -> None:
+def test_identity_changing_redirect_remains_a_partial_failure() -> None:
     pages = _official_pages()
-    requested = model_page_url("glm-5.2-quickstart")
-    destination = model_page_url("glm-5.3-quickstart")
+    requested = model_page_url("glm-5.3-quickstart")
+    destination = model_page_url("kimi-k3-quickstart")
     pages[requested] = FixtureHop(status=307, location=destination)
     result = refresh_together_catalog(
         _transport(pages),
@@ -191,24 +191,15 @@ def test_glm_53_page_does_not_clear_glm_52_failure_or_partial_notice() -> None:
     assert result.catalog is not None
     codes = {notice.code for notice in result.notices}
     assert "PARTIAL_MODEL_PAGES:together" in codes
-    assert "SOURCE_FETCH_FAILED:together-docs-model-page:glm-5.2-quickstart" in codes
-    assert "SOURCE_FETCH_FAILED:together-docs-model-page:glm-5.3-quickstart" not in codes
-    assert "SOURCE_FETCH_FAILED:together-docs-model-page:kimi-k2.6-quickstart" not in codes
+    assert "SOURCE_FETCH_FAILED:together-docs-model-page:glm-5.3-quickstart" in codes
+    assert "SOURCE_FETCH_FAILED:together-docs-model-page:kimi-k3-quickstart" not in codes
     ids = [item.samyak_id for item in result.catalog.models]
-    assert ids.count("together:zai-org/GLM-5.3") == 1
-    assert ids.count("together:zai-org/GLM-5.3-Flash") == 1
     assert ids.count("together:zai-org/GLM-5.2") == 1
     glm52 = next(
         item for item in result.catalog.models if item.samyak_id == "together:zai-org/GLM-5.2"
     )
     assert glm52.provider_model_id == "zai-org/GLM-5.2"
     assert glm52.max_output_tokens.status is FactStatus.UNKNOWN
-    flagship = next(
-        item for item in result.catalog.models if item.samyak_id == "together:zai-org/GLM-5.3"
-    )
-    assert flagship.provider_model_id == "zai-org/GLM-5.3"
-    assert flagship.display_name.value == "GLM-5.3"
-    assert flagship.context_window.status is FactStatus.UNKNOWN
 
 
 def test_refresh_partial_when_optional_changelog_missing() -> None:
@@ -280,9 +271,16 @@ def test_official_sources_are_markdown_on_docs_host() -> None:
     assert SERVERLESS_URL == "https://docs.together.ai/docs/serverless/models.md"
     assert DEPRECATIONS_URL == "https://docs.together.ai/docs/deprecations.md"
     assert CHANGELOG_URL == "https://docs.together.ai/docs/changelog.md"
-    assert model_page_url("glm-5.2-quickstart") == (
-        "https://docs.together.ai/docs/glm-5.2-quickstart.md"
-    )
+    optional = optional_source_descriptors()
+    configured = {item.source_id for item in optional}
+    assert "together-docs-model-page:glm-5.2-quickstart" not in configured
+    assert "together-docs-model-page:kimi-k2.6-quickstart" not in configured
+    assert "together-docs-model-page:glm-5.3-quickstart" in configured
+    assert "together-docs-model-page:kimi-k3-quickstart" in configured
+    assert "together-docs-model-page:gpt-oss" in configured
+    configured_urls = {item.url for item in optional}
+    assert "https://docs.together.ai/docs/glm-5.2-quickstart.md" not in configured_urls
+    assert "https://docs.together.ai/docs/kimi-k2.6-quickstart.md" not in configured_urls
     for descriptor in required_source_descriptors():
         path = expected_path_for_source(descriptor)
         assert path.endswith(".md")

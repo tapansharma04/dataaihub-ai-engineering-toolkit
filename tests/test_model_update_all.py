@@ -45,7 +45,6 @@ from samyak.model.update import (
     update_provider_catalog,
 )
 from test_model_update import (
-    FIREWORKS_KIMI_URL,
     GOOGLE_INDEX_URL,
     STAMP,
     _anthropic_pages,
@@ -609,8 +608,6 @@ def test_cli_update_help_includes_all(capsys: pytest.CaptureFixture[str]) -> Non
         assert provider_id in out
 
 
-_KIMI_INSTRUCT_ID = "fireworks:accounts/fireworks/models/kimi-k2-instruct"
-_KIMI_ALIAS_ID = "fireworks:accounts/fireworks/models/kimi-k2-instruct-latest"
 _GLM_FAST_ID = "fireworks:accounts/fireworks/routers/glm-5p2-fast"
 
 
@@ -729,7 +726,7 @@ def test_failed_provider_keeps_old_facts_while_others_share_the_refresh_stamp(
         assert f"facts_not_from_this_snapshot:{provider_id}" not in exported.publication.reasons
 
 
-def test_retained_optional_source_fact_keeps_its_verified_at_during_update_all(
+def test_fireworks_absent_record_keeps_its_verified_at_during_update_all(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _patch_all_transports(monkeypatch)
@@ -739,12 +736,19 @@ def test_retained_optional_source_fact_keeps_its_verified_at_during_update_all(
     assert all(item.committed for item in first)
     established = calls[0]
     previous = store.load()
-    previous_instruct = _record(previous, _KIMI_INSTRUCT_ID)
-    previous_alias = _record(previous, _KIMI_ALIAS_ID)
-    assert _verified_at_values([previous_instruct]) == {established}
+    previous_glm = _record(previous, _GLM_FAST_ID)
+    assert _verified_at_values([previous_glm]) == {established}
 
-    pages = _fireworks_pages()
-    del pages[FIREWORKS_KIMI_URL]
+    pages = _fireworks_pages(
+        **{
+            "https://docs.fireworks.ai/serverless/serverless-modes.md": FixtureHop(
+                body=(
+                    b"# Serverless Modes\n\n| Model | `model` ID |\n| --- | --- |\n"
+                    b"| Kimi K3 Fast | `accounts/fireworks/routers/kimi-k3-fast` |\n"
+                )
+            )
+        }
+    )
     _patch_all_transports(monkeypatch, fireworks_pages=pages)
     second_index = len(calls)
     second = update_all_catalogs(store=store, clock=clock)
@@ -752,27 +756,25 @@ def test_retained_optional_source_fact_keeps_its_verified_at_during_update_all(
     assert shared != established
     fireworks = next(item for item in second if item.provider_id == "fireworks")
     assert fireworks.committed is True
-    assert fireworks.partial is True
+    assert fireworks.partial is False
     removed = {
         item.samyak_id
         for item in fireworks.lifecycle_changes
         if item.change_type is LifecycleChangeType.REMOVED
     }
-    assert _KIMI_INSTRUCT_ID not in removed
-    assert _KIMI_ALIAS_ID not in removed
+    assert _GLM_FAST_ID not in removed
 
     catalog = store.load()
-    assert _record(catalog, _KIMI_INSTRUCT_ID) == previous_instruct
-    assert _record(catalog, _KIMI_ALIAS_ID) == previous_alias
-    assert _verified_at_values(catalog.models, samyak_id=_GLM_FAST_ID) == {shared}
+    retained_glm = _record(catalog, _GLM_FAST_ID)
+    assert retained_glm.evidence_disposition.value == "not_observed_in_current_capture"
+    assert _verified_at_values([retained_glm]) == {established}
     assert catalog.generated_at == shared
     assert catalog.freshness.generated_at == shared
     assert catalog.freshness.oldest_verified_at == established
     history = FileLifecycleHistoryStore(root=store.root).load()
     assert all(event.observed_at == shared for event in history.events)
     assert not any(
-        event.change_type is LifecycleChangeType.REMOVED
-        and event.samyak_id in {_KIMI_INSTRUCT_ID, _KIMI_ALIAS_ID}
+        event.change_type is LifecycleChangeType.REMOVED and event.samyak_id == _GLM_FAST_ID
         for event in history.events
     )
 

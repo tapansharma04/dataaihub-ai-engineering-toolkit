@@ -1,6 +1,6 @@
 # Model Intelligence export contract
 
-This v0.4.0 contract is not part of the published Samyak `v0.3.0` release
+This v0.4.1 contract is not part of the published Samyak `v0.3.0` release
 (`ffd0d8ceeba2fca6d65560b609c1fc7ea6e1fb47`). It describes the JSON artifact
 produced by `samyak model export`. DataAIHub imports that file. It does not
 import `samyak.model` and does not run Samyak while serving the tracker.
@@ -18,8 +18,12 @@ schemas.
 | `capability` | string | Always `model_export`. This is the wrapper, not the catalog's `model` capability. |
 | `export_schema_version` | integer | `1` for this contract. Reject any other value. |
 | `exporter_version` | string | Samyak package version that wrote the file. It is not a schema version. |
-| `publication.status` | string | `complete` or `incomplete`. |
-| `publication.reasons` | array of strings | Empty when complete. Sorted unique reason codes when incomplete. |
+| `publication.status` | string | Legacy completeness: `complete` or `incomplete`. |
+| `publication.reasons` | array of strings | Empty when complete. Sorted unique blocking reasons and coverage warnings when incomplete. |
+| `publication.integrity_status` | string | `publishable` when no blocking reason exists; otherwise `blocked`. |
+| `publication.coverage_status` | string | `complete` when every optional source succeeded; otherwise `degraded`. |
+| `publication.blocking_reasons` | array of strings | Sorted subset of `publication.reasons` that blocks publication integrity. |
+| `publication.warnings` | array of strings | Sorted subset of `publication.reasons` for failed optional sources and degraded coverage. |
 | `coverage` | array of objects | One row per supported provider, then any extra provider ids sorted. |
 | `catalog` | object | Exact catalog schema v1 document. |
 | `history` | object or `null` | Exact history schema v1 document, or `null` when no history file existed. |
@@ -40,11 +44,21 @@ not make the export incomplete.
 
 ## Publication
 
-`complete` means every provider in the exporter's supported set is present,
-no optional-source failure notice is present, and every provenanced fact's
-`verified_at` equals `catalog.freshness.generated_at`. `not_verified` facts
-have no provenance and do not block publication. For a `conflict` fact, every
-claim must carry that same `verified_at`.
+`complete` preserves the original strict meaning: every provider in the
+exporter's supported set is present, no optional-source failure notice is
+present, and every provenanced fact's `verified_at` equals
+`catalog.freshness.generated_at`. `not_verified` facts have no provenance and
+do not block publication. For a `conflict` fact, every claim must carry that
+same `verified_at`.
+
+`integrity_status` and `coverage_status` are additive v1 fields. They do not
+change `status` or `reasons`, so consumers that ignore unknown JSON keys retain
+the strict v1 behavior. A `publishable` / `degraded` artifact has only
+optional-source-failure warnings: its legacy status remains `incomplete`.
+`blocked` means at least one blocking reason exists, including a missing
+provider, stale non-exempt provenance, or a lifecycle-history write failure.
+Importers that validate fields strictly must be updated to allow these additive
+keys before consuming this release.
 
 Reason codes:
 
@@ -73,14 +87,23 @@ older snapshot does not recover them, so publication stays incomplete while
 any marker is present. Export adds `history_write_failed` once, however many
 markers are stored.
 
+Every `optional_source_failed:` reason is a coverage warning. All other reason
+codes are blocking reasons. A rejected optional source contributes no accepted
+facts; its notice and sanitized diagnostics remain available through coverage
+metadata and source archives.
+
 `catalog.freshness.status` is separate. `as_of` means the freshness record
 was written from the snapshot clock. It does not mean the export is
-publishable. Consumers must use `publication.status` and `publication.reasons`.
+publishable. Consumers must use `publication.status` and `publication.reasons`;
+updated consumers should also use `publication.integrity_status` and
+`publication.coverage_status`.
 
 `--require-complete` is a producer option. It exits `2` without writing JSON
 when publication is incomplete, and it leaves an existing output file
-unchanged. A file written without that flag can still be incomplete. The
-importer must reject `incomplete` itself.
+unchanged. `--require-publishable` permits degraded optional-source coverage
+only when integrity is `publishable`. A file written without either flag can
+still be incomplete. Legacy importers must reject `incomplete`; updated
+importers may instead use the integrity decision while retaining warnings.
 
 ## Null, missing, and unknown
 
@@ -204,8 +227,11 @@ An importer can do all of this with a JSON parser:
 
 1. Reject unless `product` is `samyak`, `capability` is `model_export`, and
    `export_schema_version` is `1`.
-2. Reject unless `publication.status` is `complete` and `publication.reasons`
-   is empty. Do not publish an incomplete artifact.
+2. Legacy importers may continue to reject unless `publication.status` is
+   `complete` and `publication.reasons` is empty. Updated importers may publish
+   only when `publication.integrity_status` is `publishable`; they must retain
+   and display `coverage_status`, `warnings`, and provider coverage rather than
+   treating degraded specifications as unavailable or retired.
 3. Reject unless `catalog.catalog_schema_version` is `1` and
    `catalog.capability` is `model`.
 4. If `history` is null, treat history as absent. If it is an object, reject

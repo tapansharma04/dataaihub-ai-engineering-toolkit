@@ -109,6 +109,54 @@ def test_deprecated_model_lifecycle_dates_and_replacement() -> None:
     assert [item.samyak_id for item in record.replacement.value] == ["openai:gpt-5.6-sol"]
 
 
+def test_current_deprecations_affected_model_column_and_bold_dates() -> None:
+    catalog = catalog_from_openai_sources(
+        (_source(SOURCE_ID_DEPRECATIONS, "deprecations-affected-model.md", DEPRECATIONS_URL),),
+        generated_at=GENERATED_AT,
+        verified_at=VERIFIED_AT,
+        overlay=CatalogOverlay.BUNDLED,
+    )
+    record = next(item for item in catalog.models if item.samyak_id == "openai:gpt-example")
+    assert record.lifecycle.value is LifecycleState.DEPRECATED
+    assert record.retirement_at.value == "2026-12-01"
+    assert record.replacement.value is not None
+    assert [item.samyak_id for item in record.replacement.value] == ["openai:gpt-replacement"]
+    assert "openai:v1-prompts" not in {item.samyak_id for item in catalog.models}
+
+
+def test_affected_model_column_without_documented_model_ids_fails_closed() -> None:
+    with pytest.raises(OpenAIParseError, match="did not list any models"):
+        parse_openai_sources(
+            (
+                _source(
+                    SOURCE_ID_DEPRECATIONS,
+                    "deprecations-affected-model-invalid.md",
+                    DEPRECATIONS_URL,
+                ),
+            )
+        )
+
+
+def test_deprecations_heading_scopes_and_announcement_dates() -> None:
+    observations = parse_openai_sources(
+        (_source(SOURCE_ID_DEPRECATIONS, "deprecations-scoping.md", DEPRECATIONS_URL),)
+    )
+    by_id = {item.provider_model_id: item for item in observations}
+
+    assert by_id["direct-upcoming"].deprecation_listing == "upcoming"
+    assert by_id["direct-upcoming"].deprecated_at is None
+    assert by_id["dated-upcoming"].deprecation_listing == "upcoming"
+    assert by_id["dated-upcoming"].deprecated_at == "2026-01-10"
+    assert by_id["dated-upcoming-child"].deprecated_at == "2026-01-10"
+    assert by_id["undated-upcoming"].deprecated_at is None
+
+    assert by_id["direct-past"].deprecation_listing == "past"
+    assert by_id["direct-past"].deprecated_at is None
+    assert by_id["dated-past"].deprecation_listing == "past"
+    assert by_id["dated-past"].deprecated_at == "2025-03-03"
+    assert "unrelated-model" not in by_id
+
+
 def test_retired_model_uses_verified_at_not_absence() -> None:
     record = _record("openai:gpt-old-preview")
     assert record.lifecycle.value is LifecycleState.RETIRED
@@ -410,6 +458,14 @@ def test_malformed_source_is_rejected() -> None:
     assert "split_sections" not in message
     assert "KeyError" not in message
     assert "BeautifulSoup" not in message
+
+
+def test_index_discovers_listed_model_pages_but_not_inline_aggregate_catalog() -> None:
+    observations = parse_openai_sources(
+        (_source(SOURCE_ID_MODELS_INDEX, "models-inline-aggregate.md", MODELS_INDEX_URL),)
+    )
+    assert {item.provider_model_id for item in observations} == {"gpt-example", "gpt-other"}
+    assert "all" not in {item.provider_model_id for item in observations}
 
 
 def test_missing_required_identity_is_rejected() -> None:

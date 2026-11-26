@@ -4,7 +4,7 @@ Wraps an existing catalog and optional lifecycle history. Does not change
 catalog schema, history schema, or either file. Domain code only: no
 filesystem and no network.
 
-This module is part of v0.4.0, after the published v0.3.0 release. The consumer
+This module is part of v0.4.1, after the published v0.3.0 release. The consumer
 contract is ``docs/model-export-contract.md``. Downstream importers validate
 the JSON artifact and do not import this module.
 """
@@ -20,6 +20,7 @@ from samyak.__version__ import __version__
 from samyak.model.catalog import PRODUCT_NAME, CatalogNotice, ModelCatalog
 from samyak.model.errors import CatalogValidationError
 from samyak.model.facts import Fact, FactStatus
+from samyak.model.historical_evidence import historical_specification_is_publishable
 from samyak.model.history import LifecycleHistory
 from samyak.model.records import RECORD_FACT_NAMES, ModelRecord
 from samyak.model.update import (
@@ -39,6 +40,20 @@ class PublicationStatus(StrEnum):
 
     COMPLETE = "complete"
     INCOMPLETE = "incomplete"
+
+
+class PublicationIntegrityStatus(StrEnum):
+    """Whether the snapshot may be published without accepting bad evidence."""
+
+    PUBLISHABLE = "publishable"
+    BLOCKED = "blocked"
+
+
+class PublicationCoverageStatus(StrEnum):
+    """Whether every optional documentation source was available."""
+
+    COMPLETE = "complete"
+    DEGRADED = "degraded"
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,15 +78,23 @@ class ProviderCoverage:
 
 @dataclass(frozen=True, slots=True)
 class ExportPublication:
-    """Publication gate. ``complete`` is reached only when ``reasons`` is empty."""
+    """Legacy completeness plus explicit integrity and coverage decisions."""
 
     status: PublicationStatus
     reasons: tuple[str, ...]
+    integrity_status: PublicationIntegrityStatus
+    coverage_status: PublicationCoverageStatus
+    blocking_reasons: tuple[str, ...]
+    warnings: tuple[str, ...]
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "status": self.status.value,
             "reasons": list(self.reasons),
+            "integrity_status": self.integrity_status.value,
+            "coverage_status": self.coverage_status.value,
+            "blocking_reasons": list(self.blocking_reasons),
+            "warnings": list(self.warnings),
         }
 
 
@@ -107,11 +130,45 @@ class ModelExport:
             raise CatalogValidationError("publication is invalid")
         if not isinstance(self.publication.status, PublicationStatus):
             raise CatalogValidationError("publication.status is not a known publication status")
+        if not isinstance(self.publication.integrity_status, PublicationIntegrityStatus):
+            raise CatalogValidationError("publication.integrity_status is not a known status")
+        if not isinstance(self.publication.coverage_status, PublicationCoverageStatus):
+            raise CatalogValidationError("publication.coverage_status is not a known status")
         complete = self.publication.status is PublicationStatus.COMPLETE
         if complete and self.publication.reasons:
             raise CatalogValidationError("a complete export must not include publication reasons")
         if not complete and not self.publication.reasons:
             raise CatalogValidationError("an incomplete export must include publication reasons")
+        if tuple(sorted(self.publication.blocking_reasons + self.publication.warnings)) != (
+            self.publication.reasons
+        ):
+            raise CatalogValidationError(
+                "publication reasons must be classified as blocking or warnings"
+            )
+        expected_warnings = tuple(
+            reason
+            for reason in self.publication.reasons
+            if reason.startswith("optional_source_failed:")
+        )
+        if self.publication.warnings != expected_warnings:
+            raise CatalogValidationError("publication warnings must be optional-source failures")
+        expected_blocking = tuple(
+            reason for reason in self.publication.reasons if reason not in expected_warnings
+        )
+        if self.publication.blocking_reasons != expected_blocking:
+            raise CatalogValidationError("publication blocking reasons are invalid")
+        if self.publication.integrity_status is PublicationIntegrityStatus.PUBLISHABLE:
+            if self.publication.blocking_reasons:
+                raise CatalogValidationError(
+                    "a publishable export must not include blocking reasons"
+                )
+        elif not self.publication.blocking_reasons:
+            raise CatalogValidationError("a blocked export must include blocking reasons")
+        if self.publication.coverage_status is PublicationCoverageStatus.COMPLETE:
+            if self.publication.warnings:
+                raise CatalogValidationError("complete coverage must not include warnings")
+        elif not self.publication.warnings:
+            raise CatalogValidationError("degraded coverage must include warnings")
         provider_ids = tuple(item.provider_id for item in self.coverage)
         if provider_ids[: len(SUPPORTED_PROVIDERS)] != SUPPORTED_PROVIDERS:
             raise CatalogValidationError("coverage must list every supported provider")
@@ -187,12 +244,31 @@ def build_model_export(
     if any(is_history_write_failure_code(notice.code) for notice in catalog.notices):
         reasons.append("history_write_failed")
     unique_reasons = tuple(sorted(set(reasons)))
+    warnings = tuple(
+        reason for reason in unique_reasons if reason.startswith("optional_source_failed:")
+    )
+    blocking_reasons = tuple(reason for reason in unique_reasons if reason not in warnings)
     status = PublicationStatus.COMPLETE if not unique_reasons else PublicationStatus.INCOMPLETE
     return ModelExport(
         catalog=catalog,
         history=history,
         coverage=tuple(coverage),
-        publication=ExportPublication(status=status, reasons=unique_reasons),
+        publication=ExportPublication(
+            status=status,
+            reasons=unique_reasons,
+            integrity_status=(
+                PublicationIntegrityStatus.PUBLISHABLE
+                if not blocking_reasons
+                else PublicationIntegrityStatus.BLOCKED
+            ),
+            coverage_status=(
+                PublicationCoverageStatus.COMPLETE
+                if not warnings
+                else PublicationCoverageStatus.DEGRADED
+            ),
+            blocking_reasons=blocking_reasons,
+            warnings=warnings,
+        ),
         exporter_version=__version__,
     )
 
@@ -251,7 +327,12 @@ def _refreshed_with_snapshot(records: tuple[ModelRecord, ...], generated_at: str
             if not isinstance(fact, Fact):
                 continue
             for verified_at in _fact_verified_timestamps(fact):
-                if verified_at != generated_at:
+                if verified_at != generated_at and not historical_specification_is_publishable(
+                    record,
+                    name,
+                    fact,
+                    generated_at=generated_at,
+                ):
                     return False
     return True
 

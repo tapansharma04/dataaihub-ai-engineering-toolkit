@@ -1,0 +1,6 @@
+# Preserve original Google AI Studio documentation captures for parser regression tests.
+tests/fixtures/models/google/aistudio-deprecations.md whitespace=-blank-at-eol,-blank-at-eof
+tests/fixtures/models/google/aistudio-models.md whitespace=-blank-at-eol,-blank-at-eof
+tests/fixtures/models/google/models/aistudio-gemini-3-flash-preview.md whitespace=-blank-at-eol,-blank-at-eof
+tests/fixtures/models/google/models/aistudio-gemini-3.1-flash-lite.md whitespace=-blank-at-eol,-blank-at-eof
+tests/fixtures/models/google/models/aistudio-gemini-3.1-pro-preview.md whitespace=-blank-at-eol,-blank-at-eof

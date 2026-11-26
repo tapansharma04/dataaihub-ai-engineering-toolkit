@@ -45,14 +45,16 @@ CHANGELOG_URL = f"{DOCS_ORIGIN}{CHANGELOG_PATH}"
 # Allowlisted docs.together.ai serving-model quickstarts. Image/video
 # quickstarts and www.together.ai/models pages are not in this set.
 MODEL_PAGE_SLUGS = (
-    "glm-5.2-quickstart",
     "glm-5.3-quickstart",
     "kimi-k3-quickstart",
     "deepseek-v4-quickstart",
-    "kimi-k2.6-quickstart",
     "gpt-oss",
 )
 _MODEL_PAGE_SLUGS = frozenset(MODEL_PAGE_SLUGS)
+# These retired slugs remain decodable solely for old local captures and test
+# fixtures. They are not configured acquisition descriptors.
+_LEGACY_CAPTURED_MODEL_PAGE_SLUGS = frozenset({"glm-5.2-quickstart", "kimi-k2.6-quickstart"})
+_CAPTURED_MODEL_PAGE_SLUGS = _MODEL_PAGE_SLUGS | _LEGACY_CAPTURED_MODEL_PAGE_SLUGS
 _PAGE_IDENTITY = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _MODEL_PAGE_PATH = re.compile(r"^/docs/([^/]+?)(?:\.md)?$")
 
@@ -86,7 +88,7 @@ def model_page_url(page_identity: str) -> str:
 
 def model_page_source_id(page_identity: str) -> str:
     """Stable source_id for one allowlisted Together serving-model document."""
-    if not isinstance(page_identity, str) or page_identity not in _MODEL_PAGE_SLUGS:
+    if not isinstance(page_identity, str) or page_identity not in _CAPTURED_MODEL_PAGE_SLUGS:
         raise TogetherParseError("Together model page identity is not an allowlisted docs slug")
     return f"{SOURCE_ID_MODEL_PAGE_PREFIX}:{page_identity}"
 
@@ -97,7 +99,7 @@ def model_page_source_id_from_url(url: str) -> str:
         raise TogetherParseError("Together model page URL is missing")
     parsed = urlparse(url.strip())
     match = _MODEL_PAGE_PATH.fullmatch(parsed.path or "")
-    if match is None or match.group(1) not in _MODEL_PAGE_SLUGS:
+    if match is None or match.group(1) not in _CAPTURED_MODEL_PAGE_SLUGS:
         raise TogetherParseError("Together model page URL is not an allowlisted docs path")
     return model_page_source_id(match.group(1))
 
@@ -122,7 +124,7 @@ def _is_model_page_source_id(source_id: str) -> bool:
     if not source_id.startswith(prefix):
         return False
     slug = source_id[len(prefix) :]
-    return slug in _MODEL_PAGE_SLUGS and _PAGE_IDENTITY.fullmatch(slug) is not None
+    return slug in _CAPTURED_MODEL_PAGE_SLUGS and _PAGE_IDENTITY.fullmatch(slug) is not None
 
 
 @dataclass(frozen=True, slots=True)

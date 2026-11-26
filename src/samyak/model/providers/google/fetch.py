@@ -30,8 +30,9 @@ from samyak.model.providers.google.errors import (
 )
 from samyak.model.providers.google.parse import discover_model_page_identities, parse_google_sources
 from samyak.model.providers.google.sources import (
+    DEPRECATIONS_PATH,
     DOCS_HOST,
-    DOCS_PATH_PREFIX,
+    MODELS_INDEX_PATH,
     PROVIDER_ID,
     CapturedSource,
     GoogleSourceDescriptor,
@@ -69,10 +70,11 @@ class GoogleRefreshResult:
 
 
 def google_docs_policy() -> TransportPolicy:
-    """HTTPS policy for official Gemini API documentation on ai.google.dev."""
+    """HTTPS policy for only the canonical Google AI Studio documents."""
     return TransportPolicy(
         allowed_hosts=frozenset({DOCS_HOST}),
-        allowed_path_prefixes=frozenset({DOCS_PATH_PREFIX}),
+        allowed_path_prefixes=frozenset({MODELS_INDEX_PATH, DEPRECATIONS_PATH, "/docs/models/"}),
+        allowed_path_suffixes=frozenset({".md"}),
     )
 
 
@@ -138,9 +140,8 @@ def refresh_google_catalog(
 ) -> GoogleRefreshResult:
     """Fetch official sources and build a catalog in memory.
 
-    Required sources (models index, deprecations, Gemini 3 guide) fail the
-    operation. Individual model pages are best-effort: failures become catalog
-    notices.
+    Required sources (models index and deprecations) fail the operation.
+    Individual model pages are best-effort: failures become catalog notices.
     This function does not write bundled or cache files.
     """
     captured: list[CapturedSource] = []

@@ -1,11 +1,10 @@
 """Captured Google Gemini API documentation sources. No network access.
 
-Serving source is the Gemini API / AI Studio documentation on ai.google.dev.
+Serving source is the Gemini API documentation on Google AI Studio.
 Vertex AI, Google Cloud resource paths, and credentialed Models API endpoints
 are out of scope.
 
-Official Markdown is retrieved as ``.md.txt``. The HTML ``.md`` URL is not a
-documentation source for this adapter.
+Official Markdown is retrieved directly from canonical ``.md`` documents.
 """
 
 from __future__ import annotations
@@ -32,20 +31,22 @@ SOURCE_ID_MODEL_PAGE_PREFIX = "google-docs-model-page"
 # on those sibling facts.
 SOURCE_ID_DERIVED_CONTEXT_WINDOW = "google-derived-context-window"
 
-DOCS_HOST = "ai.google.dev"
+DOCS_HOST = "aistudio.google.com"
 DOCS_ORIGIN = f"https://{DOCS_HOST}"
-DOCS_PATH_PREFIX = "/gemini-api/docs"
-MODELS_INDEX_PATH = "/gemini-api/docs/models.md.txt"
-DEPRECATIONS_PATH = "/gemini-api/docs/deprecations.md.txt"
+DOCS_PATH_PREFIX = "/docs"
+MODELS_INDEX_PATH = "/docs/models.md"
+DEPRECATIONS_PATH = "/docs/deprecations.md"
 GEMINI_3_PATH = "/gemini-api/docs/gemini-3.md.txt"
-TOKENS_PATH = "/gemini-api/docs/tokens.md.txt"
+TOKENS_PATH = MODELS_INDEX_PATH
 MODELS_INDEX_URL = f"{DOCS_ORIGIN}{MODELS_INDEX_PATH}"
 DEPRECATIONS_URL = f"{DOCS_ORIGIN}{DEPRECATIONS_PATH}"
-GEMINI_3_URL = f"{DOCS_ORIGIN}{GEMINI_3_PATH}"
+# Retained only so archived captures can still be parsed in offline tests. It
+# is neither allowlisted nor part of a current refresh.
+GEMINI_3_URL = f"https://ai.google.dev{GEMINI_3_PATH}"
 TOKENS_URL = f"{DOCS_ORIGIN}{TOKENS_PATH}"
 
 _PAGE_IDENTITY = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-_MODEL_PAGE_PATH = re.compile(r"^/gemini-api/docs/models/([^/]+?)(?:\.md(?:\.txt)?)?$")
+_MODEL_PAGE_PATH = re.compile(r"^/docs/models/([^/]+?)(?:\.md)?$")
 
 
 class GoogleSourceType(StrEnum):
@@ -72,7 +73,7 @@ _SOURCE_KINDS = {
 
 
 def model_page_url(page_identity: str) -> str:
-    return f"{DOCS_ORIGIN}/gemini-api/docs/models/{page_identity}.md.txt"
+    return f"{DOCS_ORIGIN}/docs/models/{page_identity}.md"
 
 
 def model_page_source_id(page_identity: str) -> str:
@@ -222,16 +223,23 @@ def deprecations_descriptor() -> GoogleSourceDescriptor:
 
 
 def gemini_3_descriptor() -> GoogleSourceDescriptor:
+    """Legacy aggregate-guide descriptor retained for offline parse compatibility."""
     return GoogleSourceDescriptor(
         source_id=SOURCE_ID_GEMINI_3,
         source_type=GoogleSourceType.GEMINI_3,
         url=GEMINI_3_URL,
-        required=True,
+        required=False,
     )
 
 
 def required_source_descriptors() -> tuple[GoogleSourceDescriptor, ...]:
-    return (models_index_descriptor(), deprecations_descriptor(), gemini_3_descriptor())
+    """The current inventory and deprecations schedules are authoritative.
+
+    Gemini 3 token limits now come from individual, optional model pages.
+    The old aggregate guide remains parseable for archived fixtures only; it
+    is not acquired and cannot make a current refresh succeed or fail.
+    """
+    return (models_index_descriptor(), deprecations_descriptor())
 
 
 def model_page_descriptor(page_identity: str) -> GoogleSourceDescriptor:

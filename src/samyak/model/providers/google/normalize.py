@@ -37,7 +37,7 @@ from samyak.model.providers.google.sources import (
     TOKENS_URL,
     GoogleSourceType,
 )
-from samyak.model.records import ModelRecord
+from samyak.model.records import EvidenceDisposition, ModelRecord
 
 _SOURCE_RANK = {
     GoogleSourceType.DEPRECATIONS: 3,
@@ -135,6 +135,9 @@ def _record_for(
     deprecations_present = any(
         item.source.source_type is GoogleSourceType.DEPRECATIONS for item in group
     )
+    deprecations_only = deprecations_present and all(
+        item.source.source_type is GoogleSourceType.DEPRECATIONS for item in group
+    )
     fallback = _fallback_observation(group, page_present=page_present)
     lifecycle_group = _observations_for_lifecycle_fields(group)
 
@@ -171,7 +174,9 @@ def _record_for(
     )
     context_window = _merge(
         group,
-        lambda item: _context_window(item.context_window_tokens),
+        lambda item: _context_window(
+            item.context_window_tokens, combined=item.context_window_is_combined
+        ),
         verified_at,
         fallback,
         field="context_window",
@@ -193,6 +198,10 @@ def _record_for(
         field="max_output_tokens",
         evaluated=page_present,
     )
+    if max_output.status is FactStatus.UNKNOWN and any(
+        item.output_limit_unrepresentable for item in group
+    ):
+        max_output = Fact(status=FactStatus.NOT_VERIFIED)
     input_modalities = _merge(
         group,
         lambda item: _modalities(item.input_modalities),
@@ -328,6 +337,11 @@ def _record_for(
     return ModelRecord(
         identity=identity,
         identity_kind=identity_kind,
+        evidence_disposition=(
+            EvidenceDisposition.HISTORICAL_REFERENCE_ONLY
+            if deprecations_only
+            else EvidenceDisposition.CURRENT_DOCUMENTED
+        ),
         display_name=display_name,
         aliases=aliases,
         resolves_to=resolves_fact,
@@ -617,10 +631,13 @@ def _provenance(
     )
 
 
-def _context_window(tokens: int | None) -> ContextWindow | None:
+def _context_window(tokens: int | None, *, combined: bool = False) -> ContextWindow | None:
     if tokens is None:
         return None
-    return ContextWindow(tokens=tokens, kind=ContextWindowKind.UNKNOWN)
+    return ContextWindow(
+        tokens=tokens,
+        kind=ContextWindowKind.COMBINED if combined else ContextWindowKind.UNKNOWN,
+    )
 
 
 def _apply_google_combined_context(
