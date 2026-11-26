@@ -16,11 +16,9 @@ from samyak.model.providers.google.fetch import (
 )
 from samyak.model.providers.google.sources import (
     DEPRECATIONS_URL,
-    GEMINI_3_URL,
     MODELS_INDEX_URL,
     deprecations_descriptor,
     expected_path_for_source,
-    gemini_3_descriptor,
     model_page_url,
     models_index_descriptor,
     required_source_descriptors,
@@ -54,19 +52,11 @@ def _transport(pages: dict[str, FixtureHop], *, clock: object | None = None) -> 
 
 def _official_pages(**overrides: FixtureHop) -> dict[str, FixtureHop]:
     pages = {
-        MODELS_INDEX_URL: _md("models.md"),
-        DEPRECATIONS_URL: _md("deprecations.md"),
-        GEMINI_3_URL: _md("gemini-3.md"),
-        model_page_url("gemini-3.8-flash"): _md("models/gemini-3.8-flash.md"),
-        model_page_url("gemini-3.1-flash-image"): _md("models/gemini-3.1-flash-image.md"),
-        model_page_url("gemini-3.1-pro-preview"): _md("models/gemini-3.1-pro-preview.md"),
-        model_page_url("gemini-3.5-transcribe"): _md("models/gemini-3.5-transcribe.md"),
-        model_page_url("index-only"): _md("models/index-only.md"),
-        model_page_url("sparse-test"): _md("models/sparse-test.md"),
-        model_page_url("gemini-stable-dated"): _md("models/gemini-stable-dated.md"),
-        model_page_url("gemini-alias-target"): _md("models/gemini-alias-target.md"),
-        model_page_url("imagen"): _md("models/imagen.md"),
-        model_page_url("gemini-2.0-flash"): _md("models/gemini-2.0-flash.md"),
+        MODELS_INDEX_URL: _md("aistudio-models-subset.md"),
+        DEPRECATIONS_URL: _md("aistudio-deprecations.md"),
+        model_page_url("gemini-3.1-flash-lite"): _md("models/aistudio-gemini-3.1-flash-lite.md"),
+        model_page_url("gemini-3.1-pro-preview"): _md("models/aistudio-gemini-3.1-pro-preview.md"),
+        model_page_url("gemini-3-flash-preview"): _md("models/aistudio-gemini-3-flash-preview.md"),
     }
     pages.update(overrides)
     return pages
@@ -91,55 +81,55 @@ def test_parser_modules_do_not_import_http() -> None:
 def test_rejects_non_https() -> None:
     transport = _transport({})
     with pytest.raises(TransportSecurityError, match="HTTPS"):
-        transport.get("http://ai.google.dev/gemini-api/docs/models.md.txt")
+        transport.get("http://aistudio.google.com/docs/models.md")
 
 
 def test_rejects_unapproved_host() -> None:
     transport = _transport({})
     with pytest.raises(TransportSecurityError, match="approved documentation host"):
-        transport.get("https://evil.example/gemini-api/docs/models.md.txt")
+        transport.get("https://evil.example/docs/models.md")
 
 
 def test_rejects_vertex_host() -> None:
     transport = _transport({})
     with pytest.raises(TransportSecurityError, match="approved documentation host"):
-        transport.get("https://docs.cloud.google.com/vertex-ai/docs/models.md.txt")
+        transport.get("https://docs.cloud.google.com/vertex-ai/docs/models.md")
 
 
 def test_rejects_unapproved_path() -> None:
     transport = _transport({})
     with pytest.raises(TransportSecurityError, match="approved documentation path"):
-        transport.get("https://ai.google.dev/gemini-api/pricing.md.txt")
+        transport.get("https://aistudio.google.com/docs/pricing.md")
+    with pytest.raises(TransportSecurityError, match="approved documentation path"):
+        transport.get("https://aistudio.google.com/docs/models/not-a-markdown-page.txt")
 
 
 def test_rejects_query_and_fragment() -> None:
     transport = _transport({})
     with pytest.raises(TransportSecurityError, match="query"):
-        transport.get("https://ai.google.dev/gemini-api/docs/models.md.txt?key=1")
+        transport.get("https://aistudio.google.com/docs/models.md?key=1")
     with pytest.raises(TransportSecurityError, match="fragment"):
-        transport.get("https://ai.google.dev/gemini-api/docs/models.md.txt#top")
+        transport.get("https://aistudio.google.com/docs/models.md#top")
 
 
 def test_rejects_credentials_in_url() -> None:
     transport = _transport({})
     with pytest.raises(TransportSecurityError, match="credentials"):
-        transport.get("https://user:pass@ai.google.dev/gemini-api/docs/models.md.txt")
+        transport.get("https://user:pass@aistudio.google.com/docs/models.md")
 
 
 def test_capture_required_sources() -> None:
     transport = _transport(_official_pages())
     index = capture_google_source(transport, models_index_descriptor())
     deprecations = capture_google_source(transport, deprecations_descriptor())
-    gemini_3 = capture_google_source(transport, gemini_3_descriptor())
     assert index.source_id == "google-docs-models-index"
     assert deprecations.source_id == "google-docs-deprecations"
-    assert gemini_3.source_id == "google-docs-gemini-3"
     assert index.retrieved_at == STAMP
 
 
 def test_refresh_partial_when_model_page_missing() -> None:
     pages = _official_pages()
-    del pages[model_page_url("index-only")]
+    del pages[model_page_url("gemini-3.1-flash-lite")]
     result = refresh_google_catalog(
         _transport(pages),
         generated_at=STAMP,
@@ -149,7 +139,7 @@ def test_refresh_partial_when_model_page_missing() -> None:
     assert result.partial is True
     codes = {notice.code for notice in result.notices}
     assert "PARTIAL_MODEL_PAGES:google" in codes
-    assert "SOURCE_FETCH_FAILED:google-docs-model-page:index-only" in codes
+    assert "SOURCE_FETCH_FAILED:google-docs-model-page:gemini-3.1-flash-lite" in codes
 
 
 def test_refresh_complete_when_all_pages_present() -> None:
@@ -167,7 +157,11 @@ def test_refresh_complete_when_all_pages_present() -> None:
 
 def test_refresh_partial_when_model_page_malformed() -> None:
     result = refresh_google_catalog(
-        _transport(_official_pages(**{model_page_url("index-only"): _md("models/missing-id.md")})),
+        _transport(
+            _official_pages(
+                **{model_page_url("gemini-3.1-flash-lite"): _md("models/missing-id.md")}
+            )
+        ),
         generated_at=STAMP,
         verified_at=STAMP,
     )
@@ -175,7 +169,7 @@ def test_refresh_partial_when_model_page_malformed() -> None:
     assert result.partial is True
     codes = {notice.code for notice in result.notices}
     assert "PARTIAL_MODEL_PAGES:google" in codes
-    assert "SOURCE_PARSE_FAILED:google-docs-model-page:index-only" in codes
+    assert "SOURCE_PARSE_FAILED:google-docs-model-page:gemini-3.1-flash-lite" in codes
 
 
 def test_refresh_fails_closed_on_required_source() -> None:
@@ -203,9 +197,17 @@ def test_malformed_required_source_fails_refresh() -> None:
     assert result.catalog is None
 
 
-def test_malformed_gemini_3_source_fails_refresh() -> None:
-    pages = _official_pages()
-    pages[GEMINI_3_URL] = _md("gemini-3-no-context-table.md")
+def test_malformed_required_directive_table_fails_refresh() -> None:
+    pages = _official_pages(
+        **{
+            MODELS_INDEX_URL: FixtureHop(
+                body=(
+                    b"# Models\n{% table %}\n* Model\n* Endpoint\n---\n"
+                    b"* [Gemini](/docs/models/gemini)\n{% /table %}\n"
+                )
+            )
+        }
+    )
     result = refresh_google_catalog(
         _transport(pages),
         generated_at=STAMP,
@@ -213,15 +215,15 @@ def test_malformed_gemini_3_source_fails_refresh() -> None:
     )
     assert result.ok is False
     assert result.catalog is None
-    assert "context-window table" in (result.error or "")
+    assert "directive table" in (result.error or "")
 
 
-def test_official_sources_are_markdown_txt_not_html_md() -> None:
-    assert MODELS_INDEX_URL == "https://ai.google.dev/gemini-api/docs/models.md.txt"
-    assert DEPRECATIONS_URL == "https://ai.google.dev/gemini-api/docs/deprecations.md.txt"
-    assert GEMINI_3_URL == "https://ai.google.dev/gemini-api/docs/gemini-3.md.txt"
-    assert model_page_url("gemini-3.8-flash").endswith(".md.txt")
+def test_official_sources_are_canonical_ai_studio_markdown() -> None:
+    assert MODELS_INDEX_URL == "https://aistudio.google.com/docs/models.md"
+    assert DEPRECATIONS_URL == "https://aistudio.google.com/docs/deprecations.md"
+    assert model_page_url("gemini-3.1-flash-lite") == (
+        "https://aistudio.google.com/docs/models/gemini-3.1-flash-lite.md"
+    )
     for descriptor in required_source_descriptors():
         path = expected_path_for_source(descriptor)
-        assert path.endswith(".md.txt")
-        assert not path.endswith(".md")
+        assert path.endswith(".md")

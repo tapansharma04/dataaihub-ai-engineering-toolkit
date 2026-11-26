@@ -20,6 +20,8 @@ from samyak.model.catalog import (
 from samyak.model.errors import CatalogValidationError
 from samyak.model.facts import (
     Confidence,
+    ContextWindow,
+    ContextWindowKind,
     Fact,
     FactStatus,
     LifecycleState,
@@ -45,9 +47,6 @@ from samyak.model.providers.fireworks.sources import (
     EMBEDDINGS_URL as FIREWORKS_EMBEDDINGS_URL,
 )
 from samyak.model.providers.fireworks.sources import (
-    KIMI_K2_URL as FIREWORKS_KIMI_URL,
-)
-from samyak.model.providers.fireworks.sources import (
     SERVING_PATHS_URL as FIREWORKS_SERVING_URL,
 )
 from samyak.model.providers.fireworks.sources import (
@@ -62,9 +61,6 @@ from samyak.model.providers.fireworks.sources import (
 from samyak.model.providers.google.fetch import google_docs_policy
 from samyak.model.providers.google.sources import (
     DEPRECATIONS_URL as GOOGLE_DEPRECATIONS_URL,
-)
-from samyak.model.providers.google.sources import (
-    GEMINI_3_URL as GOOGLE_GEMINI_3_URL,
 )
 from samyak.model.providers.google.sources import (
     MODELS_INDEX_URL as GOOGLE_INDEX_URL,
@@ -946,25 +942,17 @@ def _google_transport(
 
 def _google_pages(**overrides: FixtureHop) -> dict[str, FixtureHop]:
     pages = {
-        GOOGLE_INDEX_URL: _google_md("models.md"),
-        GOOGLE_DEPRECATIONS_URL: _google_md("deprecations.md"),
-        GOOGLE_GEMINI_3_URL: _google_md("gemini-3.md"),
-        google_model_page_url("gemini-3.8-flash"): _google_md("models/gemini-3.8-flash.md"),
-        google_model_page_url("gemini-3.1-flash-image"): _google_md(
-            "models/gemini-3.1-flash-image.md"
+        GOOGLE_INDEX_URL: _google_md("aistudio-models-subset.md"),
+        GOOGLE_DEPRECATIONS_URL: _google_md("aistudio-deprecations.md"),
+        google_model_page_url("gemini-3.1-flash-lite"): _google_md(
+            "models/aistudio-gemini-3.1-flash-lite.md"
         ),
         google_model_page_url("gemini-3.1-pro-preview"): _google_md(
-            "models/gemini-3.1-pro-preview.md"
+            "models/aistudio-gemini-3.1-pro-preview.md"
         ),
-        google_model_page_url("gemini-3.5-transcribe"): _google_md(
-            "models/gemini-3.5-transcribe.md"
+        google_model_page_url("gemini-3-flash-preview"): _google_md(
+            "models/aistudio-gemini-3-flash-preview.md"
         ),
-        google_model_page_url("index-only"): _google_md("models/index-only.md"),
-        google_model_page_url("sparse-test"): _google_md("models/sparse-test.md"),
-        google_model_page_url("gemini-stable-dated"): _google_md("models/gemini-stable-dated.md"),
-        google_model_page_url("gemini-alias-target"): _google_md("models/gemini-alias-target.md"),
-        google_model_page_url("imagen"): _google_md("models/imagen.md"),
-        google_model_page_url("gemini-2.0-flash"): _google_md("models/gemini-2.0-flash.md"),
     }
     pages.update(overrides)
     return pages
@@ -1044,6 +1032,70 @@ def test_google_update_does_not_delete_openai_or_anthropic_on_second_refresh(
     } == anthropic_ids
 
 
+def test_google_refresh_preserves_prior_historical_specifications(tmp_path: Path) -> None:
+    store = FileCatalogStore(root=tmp_path / "cache")
+    historical_stamp = "2026-08-01T12:00:00+00:00"
+    historical_provenance = Provenance(
+        provider="google",
+        source_id="google-docs-historical-model-page:gemini-3.1-flash-image-preview",
+        source_kind=SourceKind.PROVIDER_DOCS,
+        source_url="https://example.invalid/gemini-3.1-flash-image-preview",
+        content_hash="sha256:historical",
+        retrieved_at=historical_stamp,
+        observed_at=historical_stamp,
+        verified_at=historical_stamp,
+        confidence=Confidence.HIGH,
+    )
+    historical_context = Fact(
+        status=FactStatus.KNOWN,
+        value=ContextWindow(tokens=128_000, kind=ContextWindowKind.COMBINED),
+        provenance=historical_provenance,
+    )
+    historical_tool_calling = Fact(
+        status=FactStatus.KNOWN,
+        value=True,
+        provenance=historical_provenance,
+    )
+    store.save(
+        build_catalog(
+            models=(
+                ModelRecord(
+                    identity=ModelIdentity(
+                        provider_id="google", provider_model_id="gemini-3.1-flash-image-preview"
+                    ),
+                    context_window=historical_context,
+                    tool_calling=historical_tool_calling,
+                ),
+            ),
+            generated_at=historical_stamp,
+            freshness=CatalogFreshness(
+                status=FreshnessStatus.AS_OF,
+                generated_at=historical_stamp,
+                overlay=CatalogOverlay.USER_CACHE,
+            ),
+        )
+    )
+
+    result = update_google_catalog(
+        transport=_google_transport(_google_pages()),
+        store=store,
+        clock=lambda: "2026-09-12T12:00:00+00:00",
+    )
+
+    assert result.committed is True
+    record = next(
+        item
+        for item in store.load().models
+        if item.samyak_id == "google:gemini-3.1-flash-image-preview"
+    )
+    assert record.evidence_disposition is EvidenceDisposition.HISTORICAL_REFERENCE_ONLY
+    assert record.context_window.value == historical_context.value
+    assert record.context_window.provenance == historical_provenance
+    assert record.tool_calling.value is True
+    assert record.tool_calling.provenance == historical_provenance
+    assert record.api_access.status is FactStatus.NOT_VERIFIED
+
+
 def test_failed_google_update_preserves_live_catalog(tmp_path: Path) -> None:
     store = FileCatalogStore(root=tmp_path / "cache")
     update_openai_catalog(
@@ -1108,7 +1160,7 @@ def test_google_partial_does_not_replace_openai_partial_code(tmp_path: Path) -> 
         clock=_clock,
     )
     google_pages = _google_pages()
-    del google_pages[google_model_page_url("index-only")]
+    del google_pages[google_model_page_url("gemini-3.1-flash-lite")]
     result = update_google_catalog(
         transport=_google_transport(google_pages),
         store=store,
@@ -1120,7 +1172,7 @@ def test_google_partial_does_not_replace_openai_partial_code(tmp_path: Path) -> 
     assert "PARTIAL_MODEL_PAGES" in codes
     assert "PARTIAL_MODEL_PAGES:google" in codes
     assert "SOURCE_FETCH_FAILED:openai-docs-model-page:index-only" in codes
-    assert "SOURCE_FETCH_FAILED:google-docs-model-page:index-only" in codes
+    assert "SOURCE_FETCH_FAILED:google-docs-model-page:gemini-3.1-flash-lite" in codes
 
 
 def test_corrupt_catalog_google_update_does_not_write(tmp_path: Path) -> None:
@@ -1221,7 +1273,6 @@ def _fireworks_pages(**overrides: FixtureHop) -> dict[str, FixtureHop]:
         FIREWORKS_TEXT_URL: _fireworks_md("text-models.md"),
         FIREWORKS_VISION_URL: _fireworks_md("vision-models.md"),
         FIREWORKS_TOOL_URL: _fireworks_md("tool-calling.md"),
-        FIREWORKS_KIMI_URL: _fireworks_md("kimi-k2.md"),
     }
     pages.update(overrides)
     return pages
@@ -1365,7 +1416,7 @@ def test_fireworks_partial_does_not_replace_openai_partial_code(tmp_path: Path) 
         clock=_clock,
     )
     fireworks_pages = _fireworks_pages()
-    del fireworks_pages[FIREWORKS_KIMI_URL]
+    del fireworks_pages[FIREWORKS_TEXT_URL]
     result = update_fireworks_catalog(
         transport=_fireworks_transport(fireworks_pages),
         store=store,
@@ -1378,11 +1429,10 @@ def test_fireworks_partial_does_not_replace_openai_partial_code(tmp_path: Path) 
     assert "PARTIAL_MODEL_PAGES:fireworks" in codes
     assert "DOCUMENTED_SUBSET:fireworks" in codes
     assert "SOURCE_FETCH_FAILED:openai-docs-model-page:index-only" in codes
-    assert "SOURCE_FETCH_FAILED:fireworks-docs-model-page:kimi-k2" in codes
+    assert "SOURCE_FETCH_FAILED:fireworks-docs-text-models" in codes
 
 
-_KIMI_INSTRUCT_ID = "fireworks:accounts/fireworks/models/kimi-k2-instruct"
-_KIMI_ALIAS_ID = "fireworks:accounts/fireworks/models/kimi-k2-instruct-latest"
+_GLM_FAST_ID = "fireworks:accounts/fireworks/routers/glm-5p2-fast"
 _SERVING_WITHOUT_NEW_FAST = (
     b"# Serverless Modes\n\n"
     b"Fast is not a different model.\n\n"
@@ -1397,9 +1447,6 @@ _SERVING_WITHOUT_GLM_FAST = (
     b"| --- | --- |\n"
     b"| Kimi K3 Fast | `accounts/fireworks/routers/kimi-k3-fast` |\n"
 )
-_KIMI_PAGE_WITHOUT_INSTRUCT = (
-    b'# Kimi K2 family\n\n```python\nmodel="accounts/fireworks/models/kimi-k2p5"\n```\n'
-)
 
 
 def _fireworks_record(catalog, samyak_id: str):
@@ -1408,7 +1455,7 @@ def _fireworks_record(catalog, samyak_id: str):
     return matches[0]
 
 
-def test_fireworks_optional_page_failure_preserves_page_established_model(
+def test_fireworks_optional_source_failure_does_not_infer_removal(
     tmp_path: Path,
 ) -> None:
     store = FileCatalogStore(root=tmp_path / "cache")
@@ -1419,10 +1466,8 @@ def test_fireworks_optional_page_failure_preserves_page_established_model(
     )
     assert first.committed is True
     assert first.partial is False
-    previous_instruct = _fireworks_record(first.catalog, _KIMI_INSTRUCT_ID)
-    previous_alias = _fireworks_record(first.catalog, _KIMI_ALIAS_ID)
     pages = _fireworks_pages()
-    del pages[FIREWORKS_KIMI_URL]
+    del pages[FIREWORKS_TEXT_URL]
     second = update_fireworks_catalog(
         transport=_fireworks_transport(pages),
         store=store,
@@ -1434,19 +1479,18 @@ def test_fireworks_optional_page_failure_preserves_page_established_model(
     assert second.catalog is not None
     codes = {notice.code for notice in second.catalog.notices}
     assert "PARTIAL_MODEL_PAGES:fireworks" in codes
-    assert "SOURCE_FETCH_FAILED:fireworks-docs-model-page:kimi-k2" in codes
-    retained = _fireworks_record(second.catalog, _KIMI_INSTRUCT_ID)
-    assert retained == previous_instruct
-    assert _fireworks_record(second.catalog, _KIMI_ALIAS_ID) == previous_alias
+    assert "SOURCE_FETCH_FAILED:fireworks-docs-text-models" in codes
     removed = {
         item.samyak_id
         for item in second.lifecycle_changes
         if item.change_type is LifecycleChangeType.REMOVED
     }
-    assert _KIMI_INSTRUCT_ID not in removed
-    assert _KIMI_ALIAS_ID not in removed
+    assert _GLM_FAST_ID not in removed
     loaded = store.load()
-    assert _fireworks_record(loaded, _KIMI_INSTRUCT_ID) == previous_instruct
+    assert (
+        _fireworks_record(loaded, _GLM_FAST_ID).evidence_disposition
+        is EvidenceDisposition.CURRENT_DOCUMENTED
+    )
 
 
 def test_fireworks_partial_refresh_still_adds_new_serving_path_models(tmp_path: Path) -> None:
@@ -1463,7 +1507,7 @@ def test_fireworks_partial_refresh_still_adds_new_serving_path_models(tmp_path: 
     ids = {item.samyak_id for item in first.catalog.models}
     assert "fireworks:accounts/fireworks/routers/kimi-k3-fast" not in ids
     second_pages = _fireworks_pages()
-    del second_pages[FIREWORKS_KIMI_URL]
+    del second_pages[FIREWORKS_TEXT_URL]
     second = update_fireworks_catalog(
         transport=_fireworks_transport(second_pages),
         store=store,
@@ -1483,9 +1527,9 @@ def test_fireworks_partial_refresh_still_adds_new_serving_path_models(tmp_path: 
         for item in second.lifecycle_changes
         if item.change_type is LifecycleChangeType.REMOVED
     }
-    assert _KIMI_INSTRUCT_ID not in removed
+    assert _GLM_FAST_ID not in removed
     loaded_ids = {item.samyak_id for item in store.load().models}
-    assert _KIMI_INSTRUCT_ID in loaded_ids
+    assert _GLM_FAST_ID in loaded_ids
     assert "fireworks:accounts/fireworks/routers/kimi-k3-fast" in loaded_ids
 
 
@@ -1499,7 +1543,7 @@ def test_fireworks_complete_capture_retains_absent_identity_as_not_observed(tmp_
     assert first.committed is True
     second = update_fireworks_catalog(
         transport=_fireworks_transport(
-            _fireworks_pages(**{FIREWORKS_KIMI_URL: FixtureHop(body=_KIMI_PAGE_WITHOUT_INSTRUCT)})
+            _fireworks_pages(**{FIREWORKS_SERVING_URL: FixtureHop(body=_SERVING_WITHOUT_GLM_FAST)})
         ),
         store=store,
         clock=lambda: "2026-09-12T14:00:00+00:00",
@@ -1512,11 +1556,11 @@ def test_fireworks_complete_capture_retains_absent_identity_as_not_observed(tmp_
     changed = [
         item
         for item in second.lifecycle_changes
-        if item.samyak_id == _KIMI_INSTRUCT_ID
+        if item.samyak_id == _GLM_FAST_ID
         and item.change_type is LifecycleChangeType.DOCUMENTATION_CHANGED
     ]
     assert len(changed) == 1
-    retained = _fireworks_record(store.load(), _KIMI_INSTRUCT_ID)
+    retained = _fireworks_record(store.load(), _GLM_FAST_ID)
     assert retained.evidence_disposition is EvidenceDisposition.NOT_OBSERVED_IN_CURRENT_CAPTURE
 
 
@@ -1531,7 +1575,7 @@ def test_fireworks_partial_capture_preserves_absent_identity_without_negative_cl
     )
     assert first.committed is True
     pages = _fireworks_pages(**{FIREWORKS_SERVING_URL: FixtureHop(body=_SERVING_WITHOUT_GLM_FAST)})
-    del pages[FIREWORKS_KIMI_URL]
+    del pages[FIREWORKS_TEXT_URL]
     second = update_fireworks_catalog(
         transport=_fireworks_transport(pages),
         store=store,
@@ -1541,7 +1585,7 @@ def test_fireworks_partial_capture_preserves_absent_identity_without_negative_cl
     assert not any(
         item.change_type is LifecycleChangeType.REMOVED for item in second.lifecycle_changes
     )
-    retained = _fireworks_record(store.load(), "fireworks:accounts/fireworks/routers/glm-5p2-fast")
+    retained = _fireworks_record(store.load(), _GLM_FAST_ID)
     assert retained.evidence_disposition is EvidenceDisposition.CURRENT_DOCUMENTED
 
 
@@ -1697,7 +1741,7 @@ def test_failed_optional_page_preserves_inventory_established_model_without_rela
         )
     )
     pages = _fireworks_pages(**{FIREWORKS_SERVING_URL: FixtureHop(body=_SERVING_WITHOUT_GLM_FAST)})
-    del pages[FIREWORKS_KIMI_URL]
+    del pages[FIREWORKS_TEXT_URL]
     second = update_fireworks_catalog(
         transport=_fireworks_transport(pages),
         store=store,

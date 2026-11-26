@@ -20,6 +20,8 @@ from samyak.model.catalog import (
 )
 from samyak.model.export import (
     EXPORT_SCHEMA_VERSION,
+    PublicationCoverageStatus,
+    PublicationIntegrityStatus,
     PublicationStatus,
     build_model_export,
     model_export_to_json,
@@ -37,7 +39,7 @@ from samyak.model.history import LifecycleHistory, LifecycleHistoryEvent
 from samyak.model.history_store import FileLifecycleHistoryStore
 from samyak.model.identity import IdentityKind, ModelIdentity
 from samyak.model.lifecycle import LifecycleChangeType
-from samyak.model.records import ModelRecord
+from samyak.model.records import EvidenceDisposition, ModelRecord
 from samyak.model.serialize import catalog_from_dict
 from samyak.model.store import FileCatalogStore
 from samyak.model.update import (
@@ -151,8 +153,17 @@ def test_complete_snapshot_includes_fireworks_subset_notice() -> None:
     assert payload["export_schema_version"] == EXPORT_SCHEMA_VERSION == 1
     assert payload["exporter_version"] == __version__
     assert tuple(payload) == _EXPORT_KEYS
-    assert payload["publication"] == {"status": "complete", "reasons": []}
+    assert payload["publication"] == {
+        "status": "complete",
+        "reasons": [],
+        "integrity_status": "publishable",
+        "coverage_status": "complete",
+        "blocking_reasons": [],
+        "warnings": [],
+    }
     assert exported.publication.status is PublicationStatus.COMPLETE
+    assert exported.publication.integrity_status is PublicationIntegrityStatus.PUBLISHABLE
+    assert exported.publication.coverage_status is PublicationCoverageStatus.COMPLETE
     assert payload["history"] is None
     assert payload["catalog"] == catalog.to_dict()
     assert payload["catalog"]["catalog_schema_version"] == CATALOG_SCHEMA_VERSION
@@ -351,6 +362,74 @@ def test_optional_source_notices_block_publication() -> None:
     assert by_provider["google"].optional_source_failures == (
         "SOURCE_PARSE_FAILED:google-docs-model-page:gemini",
     )
+    assert exported.publication.integrity_status is PublicationIntegrityStatus.PUBLISHABLE
+    assert exported.publication.coverage_status is PublicationCoverageStatus.DEGRADED
+    assert exported.publication.blocking_reasons == ()
+    assert exported.publication.warnings == exported.publication.reasons
+
+
+@pytest.mark.parametrize(
+    ("code", "message"),
+    (
+        ("SOURCE_FETCH_FAILED:openai-docs-model-page:gpt-404", "HTTP 404"),
+        ("SOURCE_FETCH_FAILED:openai-docs-model-page:gpt-timeout", "timeout"),
+        ("SOURCE_PARSE_FAILED:openai-docs-model-page:gpt-malformed", "parse failure"),
+        (
+            "SOURCE_FETCH_FAILED:together-docs-model-page:glm-5.3-quickstart",
+            "identity-changing redirect rejected",
+        ),
+    ),
+)
+def test_isolated_optional_source_failures_are_publishable_with_degraded_coverage(
+    code: str, message: str
+) -> None:
+    exported = build_model_export(
+        _catalog(notices=(CatalogNotice(code=code, message=message),)), None
+    )
+    assert exported.publication.status is PublicationStatus.INCOMPLETE
+    assert exported.publication.integrity_status is PublicationIntegrityStatus.PUBLISHABLE
+    assert exported.publication.coverage_status is PublicationCoverageStatus.DEGRADED
+    assert exported.publication.blocking_reasons == ()
+    assert exported.publication.warnings == (f"optional_source_failed:{code}",)
+
+
+def test_multiple_optional_source_failures_are_publishable_with_degraded_coverage() -> None:
+    notices = (
+        CatalogNotice(code="SOURCE_FETCH_FAILED:openai-docs-model-page:a", message="404"),
+        CatalogNotice(code="SOURCE_PARSE_FAILED:openai-docs-model-page:b", message="malformed"),
+    )
+    exported = build_model_export(_catalog(notices=notices), None)
+    assert exported.publication.integrity_status is PublicationIntegrityStatus.PUBLISHABLE
+    assert exported.publication.coverage_status is PublicationCoverageStatus.DEGRADED
+    assert len(exported.publication.warnings) == 2
+
+
+def test_optional_failure_with_unapproved_stale_fact_remains_blocked() -> None:
+    models = tuple(
+        _model(
+            provider_id,
+            lifecycle=_known_lifecycle(
+                provider_id,
+                verified_at=OLDER if provider_id == "together" else GENERATED_AT,
+            ),
+        )
+        for provider_id in SUPPORTED_PROVIDERS
+    )
+    exported = build_model_export(
+        _catalog(
+            models,
+            notices=(
+                CatalogNotice(
+                    code="SOURCE_FETCH_FAILED:together-docs-model-page:gpt-oss",
+                    message="optional page failed",
+                ),
+            ),
+        ),
+        None,
+    )
+    assert exported.publication.integrity_status is PublicationIntegrityStatus.BLOCKED
+    assert exported.publication.coverage_status is PublicationCoverageStatus.DEGRADED
+    assert exported.publication.blocking_reasons == ("facts_not_from_this_snapshot:together",)
 
 
 def test_older_verified_at_marks_snapshot_incomplete() -> None:
@@ -369,6 +448,53 @@ def test_older_verified_at_marks_snapshot_incomplete() -> None:
     together = next(item for item in exported.coverage if item.provider_id == "together")
     assert together.present is True
     assert together.refreshed_with_snapshot is False
+
+
+def test_historical_google_specifications_do_not_make_a_snapshot_incomplete() -> None:
+    historical_specification = Fact(
+        status=FactStatus.KNOWN,
+        value=128_000,
+        provenance=_provenance("google", verified_at=OLDER),
+    )
+    models = []
+    for provider_id in SUPPORTED_PROVIDERS:
+        if provider_id == "google":
+            models.append(
+                ModelRecord(
+                    identity=ModelIdentity(provider_id="google", provider_model_id="retired"),
+                    evidence_disposition=EvidenceDisposition.HISTORICAL_REFERENCE_ONLY,
+                    lifecycle=_known_lifecycle("google", LifecycleState.RETIRED),
+                    max_input_tokens=historical_specification,
+                )
+            )
+        else:
+            models.append(_model(provider_id))
+    exported = build_model_export(_catalog(tuple(models)), None)
+    assert exported.publication.status is PublicationStatus.COMPLETE
+
+
+def test_historical_google_exception_does_not_exempt_lifecycle_or_future_facts() -> None:
+    historical_specification = Fact(
+        status=FactStatus.KNOWN,
+        value=128_000,
+        provenance=_provenance("google", verified_at="2026-10-01T12:00:00+00:00"),
+    )
+    models = []
+    for provider_id in SUPPORTED_PROVIDERS:
+        if provider_id == "google":
+            models.append(
+                ModelRecord(
+                    identity=ModelIdentity(provider_id="google", provider_model_id="retired"),
+                    evidence_disposition=EvidenceDisposition.HISTORICAL_REFERENCE_ONLY,
+                    lifecycle=_known_lifecycle("google", LifecycleState.RETIRED, verified_at=OLDER),
+                    max_input_tokens=historical_specification,
+                )
+            )
+        else:
+            models.append(_model(provider_id))
+    exported = build_model_export(_catalog(tuple(models)), None)
+    assert exported.publication.status is PublicationStatus.INCOMPLETE
+    assert exported.publication.reasons == ("facts_not_from_this_snapshot:google",)
 
 
 def test_not_verified_facts_do_not_block_a_complete_snapshot() -> None:
@@ -736,6 +862,41 @@ def test_cli_require_complete_exits_zero_for_complete_snapshot(
     assert captured.err == ""
 
 
+def test_cli_require_publishable_allows_degraded_optional_coverage(
+    samyak_cache_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    catalog = _catalog(
+        notices=(
+            CatalogNotice(
+                code="SOURCE_FETCH_FAILED:openai-docs-model-page:gpt-test",
+                message="optional page was unavailable",
+            ),
+        )
+    )
+    _save_catalog(samyak_cache_dir, catalog)
+    assert main(["model", "export", "--require-complete"]) == 2
+    assert "error: model export is incomplete" in capsys.readouterr().err
+
+    assert main(["model", "export", "--require-publishable"]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["publication"]["status"] == "incomplete"
+    assert payload["publication"]["integrity_status"] == "publishable"
+    assert payload["publication"]["coverage_status"] == "degraded"
+    assert captured.err == ""
+
+
+def test_cli_require_publishable_rejects_blocked_snapshot(
+    samyak_cache_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _save_catalog(samyak_cache_dir, _incomplete_catalog())
+    assert main(["model", "export", "--require-publishable"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error: model export is not publishable" in captured.err
+    assert "provider_missing:google" in captured.err
+
+
 def test_cli_output_path_does_not_change_catalog(
     samyak_cache_dir: Path, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
@@ -960,10 +1121,11 @@ def test_cli_unsupported_catalog_schema_exits_nonzero(
     assert store.catalog_path.read_bytes() == before
 
 
-def test_cli_export_help_lists_require_complete(capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_export_help_lists_publication_requirements(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc:
         main(["model", "export", "--help"])
     assert exc.value.code == 0
     help_text = capsys.readouterr().out
     assert "--require-complete" in help_text
+    assert "--require-publishable" in help_text
     assert "--output" in help_text

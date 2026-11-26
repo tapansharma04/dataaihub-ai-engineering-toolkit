@@ -157,7 +157,10 @@ def _source_ref(source: CapturedSource) -> AnthropicSourceRef:
 def _parse_overview(source: CapturedSource) -> tuple[AnthropicModelObservation, ...]:
     body = _strip_front_matter(source.body)
     sections = split_sections(body)
-    compare = section_named(sections, "Compare models")
+    # Anthropic renamed this documented comparison section to "Latest models".
+    # Keep the section selection explicit: the structural checks below still
+    # reject arbitrary tables elsewhere in the overview.
+    compare = section_named(sections, "Compare models") or section_named(sections, "Latest models")
     if compare is None:
         raise AnthropicParseError("Anthropic models overview is missing a Compare models heading")
     table = _compare_table(compare.body)

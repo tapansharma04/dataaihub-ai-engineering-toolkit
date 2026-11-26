@@ -38,6 +38,7 @@ class TransportPolicy:
 
     allowed_hosts: frozenset[str]
     allowed_path_prefixes: frozenset[str]
+    allowed_path_suffixes: frozenset[str] = frozenset()
     allowed_content_types: frozenset[str] = frozenset({"text/markdown", "text/plain"})
     allowed_schemes: frozenset[str] = frozenset({"https"})
     max_bytes: int = 2 * 1024 * 1024
@@ -126,6 +127,10 @@ def validate_transport_url(url: str, policy: TransportPolicy) -> str:
     if not path.startswith("/"):
         path = f"/{path}"
     if not _path_allowed(path, policy.allowed_path_prefixes):
+        raise TransportSecurityError("URL path is not an approved documentation path")
+    if policy.allowed_path_suffixes and not any(
+        path.endswith(suffix) for suffix in policy.allowed_path_suffixes
+    ):
         raise TransportSecurityError("URL path is not an approved documentation path")
     if parsed.params:
         raise TransportSecurityError("URL parameters are not permitted")

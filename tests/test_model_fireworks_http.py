@@ -17,14 +17,13 @@ from samyak.model.providers.fireworks.fetch import (
 from samyak.model.providers.fireworks.sources import (
     CHANGELOG_URL,
     EMBEDDINGS_URL,
-    KIMI_K2_URL,
     SERVING_PATHS_URL,
     TEXT_MODELS_URL,
     TOOL_CALLING_URL,
     VISION_MODELS_URL,
     embeddings_descriptor,
     expected_path_for_source,
-    model_page_url,
+    optional_source_descriptors,
     required_source_descriptors,
     serving_paths_descriptor,
 )
@@ -63,7 +62,6 @@ def _official_pages(**overrides: FixtureHop) -> dict[str, FixtureHop]:
         TEXT_MODELS_URL: _md("text-models.md"),
         VISION_MODELS_URL: _md("vision-models.md"),
         TOOL_CALLING_URL: _md("tool-calling.md"),
-        KIMI_K2_URL: _md("kimi-k2.md"),
     }
     pages.update(overrides)
     return pages
@@ -174,7 +172,7 @@ def test_refresh_documents_subset_without_marking_partial() -> None:
 
 def test_refresh_partial_when_optional_page_missing() -> None:
     pages = _official_pages()
-    del pages[KIMI_K2_URL]
+    del pages[TEXT_MODELS_URL]
     result = refresh_fireworks_catalog(
         _transport(pages),
         generated_at=STAMP,
@@ -185,12 +183,16 @@ def test_refresh_partial_when_optional_page_missing() -> None:
     codes = {notice.code for notice in result.notices}
     assert "PARTIAL_MODEL_PAGES:fireworks" in codes
     assert "DOCUMENTED_SUBSET:fireworks" in codes
-    assert "SOURCE_FETCH_FAILED:fireworks-docs-model-page:kimi-k2" in codes
+    assert "SOURCE_FETCH_FAILED:fireworks-docs-text-models" in codes
 
 
-def test_refresh_partial_when_optional_page_malformed() -> None:
+def test_refresh_partial_when_optional_source_is_untrusted() -> None:
     result = refresh_fireworks_catalog(
-        _transport(_official_pages(**{KIMI_K2_URL: _md("missing-id.md")})),
+        _transport(
+            _official_pages(
+                **{TOOL_CALLING_URL: FixtureHop(headers=(("Content-Type", "text/html"),))}
+            )
+        ),
         generated_at=STAMP,
         verified_at=STAMP,
     )
@@ -198,7 +200,7 @@ def test_refresh_partial_when_optional_page_malformed() -> None:
     assert result.partial is True
     codes = {notice.code for notice in result.notices}
     assert "PARTIAL_MODEL_PAGES:fireworks" in codes
-    assert "SOURCE_PARSE_FAILED:fireworks-docs-model-page:kimi-k2" in codes
+    assert "SOURCE_FETCH_FAILED:fireworks-docs-tool-calling" in codes
 
 
 def test_refresh_fails_closed_on_required_source() -> None:
@@ -231,7 +233,12 @@ def test_official_sources_are_markdown_on_docs_host() -> None:
     assert SERVING_PATHS_URL == "https://docs.fireworks.ai/serverless/serverless-modes.md"
     assert SERVING_PATHS_URL != "https://docs.fireworks.ai/serverless/serving-paths.md"
     assert CHANGELOG_URL == "https://docs.fireworks.ai/updates/changelog.md"
-    assert model_page_url("kimi-k2").endswith("/models/kimi-k2.md")
+    optional = optional_source_descriptors()
+    optional_ids = {descriptor.source_id for descriptor in optional}
+    assert "fireworks-docs-model-page:kimi-k2" not in optional_ids
+    assert "https://docs.fireworks.ai/models/kimi-k2.md" not in {
+        descriptor.url for descriptor in optional
+    }
     for descriptor in required_source_descriptors():
         path = expected_path_for_source(descriptor)
         assert path.endswith(".md")

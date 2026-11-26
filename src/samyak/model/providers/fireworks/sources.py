@@ -41,7 +41,6 @@ TEXT_MODELS_PATH = "/guides/querying-text-models.md"
 VISION_MODELS_PATH = "/guides/querying-vision-language-models.md"
 TOOL_CALLING_PATH = "/guides/function-calling.md"
 CHANGELOG_PATH = "/updates/changelog.md"
-KIMI_K2_PATH = "/models/kimi-k2.md"
 
 EMBEDDINGS_URL = f"{DOCS_ORIGIN}{EMBEDDINGS_PATH}"
 SERVING_PATHS_URL = f"{DOCS_ORIGIN}{SERVING_PATHS_PATH}"
@@ -49,7 +48,6 @@ TEXT_MODELS_URL = f"{DOCS_ORIGIN}{TEXT_MODELS_PATH}"
 VISION_MODELS_URL = f"{DOCS_ORIGIN}{VISION_MODELS_PATH}"
 TOOL_CALLING_URL = f"{DOCS_ORIGIN}{TOOL_CALLING_PATH}"
 CHANGELOG_URL = f"{DOCS_ORIGIN}{CHANGELOG_PATH}"
-KIMI_K2_URL = f"{DOCS_ORIGIN}{KIMI_K2_PATH}"
 
 _PAGE_IDENTITY = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _MODEL_PAGE_PATH = re.compile(r"^/models/([^/]+?)(?:\.md)?$")
@@ -266,7 +264,6 @@ def optional_source_descriptors() -> tuple[FireworksSourceDescriptor, ...]:
             url=TOOL_CALLING_URL,
             required=False,
         ),
-        model_page_descriptor("kimi-k2"),
     )
 
 

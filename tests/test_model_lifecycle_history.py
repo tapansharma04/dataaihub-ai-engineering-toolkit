@@ -50,7 +50,7 @@ from samyak.model.update import (
     update_openai_catalog,
 )
 from test_model_update import (
-    FIREWORKS_KIMI_URL,
+    FIREWORKS_TEXT_URL,
     MODELS_INDEX_URL,
     _clock,
     _fireworks_pages,
@@ -478,7 +478,7 @@ def test_partial_refresh_does_not_create_false_removal_history(tmp_path: Path) -
     assert removed == []
 
 
-def test_fireworks_optional_page_failure_does_not_write_removal_history(
+def test_fireworks_optional_source_failure_does_not_write_removal_history(
     tmp_path: Path,
 ) -> None:
     catalog_store = FileCatalogStore(root=tmp_path / "cache")
@@ -489,7 +489,7 @@ def test_fireworks_optional_page_failure_does_not_write_removal_history(
     )
     assert first.committed is True
     pages = _fireworks_pages()
-    del pages[FIREWORKS_KIMI_URL]
+    del pages[FIREWORKS_TEXT_URL]
     second = update_fireworks_catalog(
         transport=_fireworks_transport(pages),
         store=catalog_store,
@@ -501,11 +501,7 @@ def test_fireworks_optional_page_failure_does_not_write_removal_history(
         item
         for item in history.events
         if item.change_type is LifecycleChangeType.REMOVED
-        and item.samyak_id
-        in {
-            "fireworks:accounts/fireworks/models/kimi-k2-instruct",
-            "fireworks:accounts/fireworks/models/kimi-k2-instruct-latest",
-        }
+        and item.samyak_id == "fireworks:accounts/fireworks/routers/glm-5p2-fast"
     ]
     assert removed == []
 

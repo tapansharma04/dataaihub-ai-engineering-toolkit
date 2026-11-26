@@ -66,8 +66,10 @@ class GoogleModelObservation:
     retirement_at: str | None = None
     replacements: tuple[str, ...] | None = None
     context_window_tokens: int | None = None
+    context_window_is_combined: bool = False
     max_input_tokens: int | None = None
     max_output_tokens: int | None = None
+    output_limit_unrepresentable: bool = False
     input_modalities: tuple[str, ...] | None = None
     output_modalities: tuple[str, ...] | None = None
     tool_calling: bool | None = None

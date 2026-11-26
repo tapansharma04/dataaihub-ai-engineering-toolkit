@@ -360,7 +360,7 @@ def test_garbage_collection_drops_expired_blobs_and_keeps_orphans(tmp_path: Path
 
 
 def test_optional_http_status_timeout_parse_and_content_type(tmp_path: Path) -> None:
-    quickstart = model_page_url("glm-5.2-quickstart")
+    quickstart = model_page_url("glm-5.3-quickstart")
     status_store = FileCatalogStore(root=tmp_path / "status")
     status_pages = _together_pages()
     status_pages[quickstart] = FixtureHop(
@@ -412,7 +412,7 @@ def test_optional_http_status_timeout_parse_and_content_type(tmp_path: Path) -> 
     parse_row = next(
         item
         for item in load_failures(parse_root, parse_id)
-        if "glm-5.2-quickstart" in str(item["source_id"])
+        if "glm-5.3-quickstart" in str(item["source_id"])
     )
     assert parse_row["stage"] == "parse"
     assert parse_row["exception_class"] == "TogetherParseError"
@@ -440,7 +440,7 @@ def test_optional_http_status_timeout_parse_and_content_type(tmp_path: Path) -> 
 def test_invalid_utf8_is_a_decode_failure_without_a_blob(tmp_path: Path) -> None:
     store = FileCatalogStore(root=tmp_path / "cache")
     pages = _together_pages()
-    quickstart = model_page_url("glm-5.2-quickstart")
+    quickstart = model_page_url("glm-5.3-quickstart")
     pages[quickstart] = FixtureHop(body=b"\xff\xfe not utf-8")
     _update(store, pages, archive_sources=True)
     root = _archive_root(store)
@@ -486,7 +486,7 @@ def test_required_source_failure_keeps_diagnostics(tmp_path: Path) -> None:
 
 
 def test_rejected_same_origin_path_keeps_sanitized_redirect_diagnostics(tmp_path: Path) -> None:
-    requested = model_page_url("glm-5.2-quickstart")
+    requested = model_page_url("glm-5.3-quickstart")
     destination = model_page_url("kimi-k3-quickstart")
     store = FileCatalogStore(root=tmp_path / "cache")
     pages = _together_pages()
@@ -501,7 +501,7 @@ def test_rejected_same_origin_path_keeps_sanitized_redirect_diagnostics(tmp_path
     status, reasons = _publication(store)
     assert status == "incomplete"
     assert (
-        "optional_source_failed:SOURCE_FETCH_FAILED:together-docs-model-page:glm-5.2-quickstart"
+        "optional_source_failed:SOURCE_FETCH_FAILED:together-docs-model-page:glm-5.3-quickstart"
         in reasons
     )
     root = _archive_root(store)
@@ -528,7 +528,7 @@ def test_rejected_same_origin_path_keeps_sanitized_redirect_diagnostics(tmp_path
 
 
 def test_failure_without_redirects_remains_readable(tmp_path: Path) -> None:
-    quickstart = model_page_url("glm-5.2-quickstart")
+    quickstart = model_page_url("glm-5.3-quickstart")
     store = FileCatalogStore(root=tmp_path / "cache")
     pages = _together_pages()
     pages[quickstart] = FixtureHop(status=404, body=b"missing")

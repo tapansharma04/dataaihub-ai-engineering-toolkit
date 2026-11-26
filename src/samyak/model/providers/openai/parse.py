@@ -148,18 +148,21 @@ def _parse_index(source: CapturedSource) -> tuple[OpenAIModelObservation, ...]:
         raise OpenAIParseError("OpenAI models index is missing a Models heading")
     seen: dict[str, OpenAIModelObservation] = {}
     ref = _source_ref(source)
-    for label, target in markdown_links(source.body):
-        model_id = _model_id_from_docs_href(target)
-        if model_id is None:
-            continue
-        if model_id in seen:
-            continue
-        seen[model_id] = OpenAIModelObservation(
-            provider_model_id=model_id,
-            source=ref,
-            display_name=label or None,
-            listed_on_index=True,
-        )
+    # The index also links inline to catalog and navigation documents. Model
+    # entries are Markdown list items; only those provide discovery evidence.
+    for item in bullet_items(source.body):
+        for label, target in markdown_links(item):
+            model_id = _model_id_from_docs_href(target)
+            if model_id is None:
+                continue
+            if model_id in seen:
+                continue
+            seen[model_id] = OpenAIModelObservation(
+                provider_model_id=model_id,
+                source=ref,
+                display_name=label or None,
+                listed_on_index=True,
+            )
     if not seen:
         raise OpenAIParseError("OpenAI models index did not list any models")
     return tuple(seen.values())
@@ -171,23 +174,40 @@ def _parse_deprecations(source: CapturedSource) -> tuple[OpenAIModelObservation,
         raise OpenAIParseError("OpenAI deprecations page is missing a Deprecations heading")
     observations: list[OpenAIModelObservation] = []
     listing: str | None = None
+    listing_level: int | None = None
     announced_on: str | None = None
+    announcement_level: int | None = None
     ref = _source_ref(source)
     for section in sections:
         title = normalize_heading(section.title)
         if title == "upcoming deprecations":
             listing = "upcoming"
+            listing_level = section.level
             announced_on = None
-            continue
-        if title == "past deprecations":
+            announcement_level = None
+        elif title == "past deprecations":
             listing = "past"
+            listing_level = section.level
             announced_on = None
-            continue
-        if listing is None:
+            announcement_level = None
+        elif listing_level is not None and section.level <= listing_level:
+            # A same- or higher-level sibling ends the recognized listing.
+            # Its tables are not deprecation inventory evidence.
+            listing = None
+            listing_level = None
+            announced_on = None
+            announcement_level = None
+        if listing is None or listing_level is None:
             continue
         heading_date = _HEADING_DATE.match(section.title.strip())
         if heading_date is not None:
             announced_on = heading_date.group(1)
+            announcement_level = section.level
+        elif announcement_level is not None and section.level <= announcement_level:
+            # A dated heading applies only to itself and descendants. An
+            # undated sibling must not inherit its announcement date.
+            announced_on = None
+            announcement_level = None
         for table in pipe_tables(section.body):
             observations.extend(
                 _observations_from_deprecation_table(
@@ -219,6 +239,7 @@ def _observations_from_deprecation_table(
                 "model snapshot",
                 "model family / snapshot",
                 "model",
+                "affected model",
             ),
         )
         model_ids = _model_ids_from_cell(model_cell)
@@ -589,6 +610,12 @@ def _parse_iso_date(raw: str) -> str | None:
     text = raw.strip()
     if not text or text in {"---", "-"}:
         return None
+    # The current deprecations table emphasizes shutdown dates with Markdown
+    # bold. This is presentation-only; normalize it before validating the date.
+    while (text.startswith("**") and text.endswith("**")) or (
+        text.startswith("__") and text.endswith("__")
+    ):
+        text = text[2:-2].strip()
     text = text.replace("\u2011", "-").replace("\u2013", "-").replace("\u2014", "-")
     text = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", text)
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):

@@ -42,7 +42,7 @@ from samyak.model.providers.google.sources import CapturedSource, GoogleSourceTy
 
 _MODEL_ID = re.compile(r"^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$")
 _MODEL_PAGE_PATH = re.compile(
-    r"^/gemini-api/docs/models/([^/]+?)(?:\.md(?:\.txt)?)?$",
+    r"^/docs/models/([^/]+?)(?:\.md)?$",
     re.IGNORECASE,
 )
 _SKIP_PAGE_SLUGS = frozenset({"models"})
@@ -83,6 +83,7 @@ _CONTEXT_WINDOW_TABLE_HEADERS = frozenset(
 _LIMITS_PROPERTIES = ("token limits", "limits")
 _MAX_INPUT_LABELS = ("input token limit", "input tokens", "input context window")
 _MAX_OUTPUT_LABELS = ("output token limit", "output tokens")
+_UNIFIED_CONTEXT_WINDOW_LABEL = "context window (unified input and output token limit)"
 _ENGLISH_DATE = re.compile(
     r"(?P<month>January|February|March|April|May|June|July|August|"
     r"September|October|November|December)\s+(?P<day>\d{1,2}),?\s+(?P<year>\d{4})",
@@ -119,6 +120,43 @@ _BOLD_FIELD = re.compile(
     r"(?P<value>.*?)(?=\s*\*\*|\s*$)",
     re.DOTALL,
 )
+_NAMED_TOKEN_LIMIT = re.compile(
+    r"(?P<label>input\s+token\s+limit|output\s+token\s+limit|"
+    r"input\s+tokens|output\s+tokens|input\s+context\s+window)\s*:?\s*"
+    r"(?P<value>[\d,]+\s*[kKmM]?(?:\s*tokens?)?)",
+    re.IGNORECASE,
+)
+_DATA_TYPE_LABEL = re.compile(
+    r"\b(?P<label>inputs?|outputs?)\s*:?[ \t]+(?P<value>.*?)(?=\s+outputs?\s*:|$)",
+    re.IGNORECASE,
+)
+_CAPABILITY_STATUS = re.compile(
+    r"\b(?P<label>function\s+calling|structured\s+outputs?)\s*:?\s*"
+    r"(?P<value>not\s+supported|supported|yes|no|true|false)\b",
+    re.IGNORECASE,
+)
+_CAPABILITY_BADGE = re.compile(
+    r"\[\*\*(?P<label>function\s+calling|structured\s+outputs?)\*\*\]\([^)]*\)"
+    r".*?\{%\s*badge\s+type=\"(?P<state>supported|not-supported)\"\s*/%\}",
+    re.IGNORECASE | re.DOTALL,
+)
+_TOKEN_LABEL = re.compile(
+    r"\b(input\s+token\s+limit|output\s+token\s+limit|input\s+tokens|"
+    r"output\s+tokens|input\s+context\s+window)\b",
+    re.IGNORECASE,
+)
+_EXPLICITLY_UNAVAILABLE = re.compile(r"\b(not available|not supported|n/?a)\b", re.IGNORECASE)
+_CONDITIONAL_MAX_OUTPUT = re.compile(
+    r"^\*\*max output\*\*\s+[^\n]+\s+\(default synchronous\)\s*/\s*"
+    r"up to\s+[^\n]+\s+\(with\s+\[long decode\]\([^)]+\)\)\s*$",
+    re.IGNORECASE,
+)
+_ZERO_OUTPUT_TOKEN_LIMIT = re.compile(
+    r"^\*\*output token limit\*\*\s+0\s+\(up to\s+\d[\d,]*\s+questions?\s+per\s+request\)\s*$",
+    re.IGNORECASE,
+)
+_DIRECTIVE_BULLET = re.compile(r"^\s*\*(?!\*)\s*(?:\S.*)?$")
+_DIRECTIVE_CELL = re.compile(r"^\s*\*(?!\*)\s*(.*)$")
 _TRUE_STATUS = frozenset(
     {
         "supported",
@@ -209,11 +247,11 @@ def _parse_index(source: CapturedSource) -> tuple[GoogleModelObservation, ...]:
     ref = _source_ref(source)
     seen: dict[str, GoogleModelObservation] = {}
     for section in sections:
-        heading = normalize_heading(section.title)
+        heading = _section_heading(section.title)
         if heading in _SKIP_INDEX_HEADINGS:
             continue
         previous = heading == "previous models"
-        for table in pipe_tables(section.body):
+        for table in _google_tables(section.body):
             for observation in _index_table_observations(
                 table, source=ref, previous_models=previous
             ):
@@ -360,18 +398,33 @@ def _parse_deprecations(source: CapturedSource) -> tuple[GoogleModelObservation,
     ref = _source_ref(source)
     observations: list[GoogleModelObservation] = []
     listing = "schedule"
+    shutdown_sections_documented = "already-shutdown models" in source.body.lower()
+    retired_scope_level: int | None = None
     for section in sections:
-        heading = normalize_heading(section.title)
-        if heading == "deprecated models" or heading.startswith("current"):
-            listing = "current"
+        heading = _section_heading(section.title)
+        if heading and retired_scope_level is not None and section.level <= retired_scope_level:
+            retired_scope_level = None
+        if heading == "deprecated models":
+            listing = "past"
+            if shutdown_sections_documented:
+                retired_scope_level = section.level
         elif heading.startswith("upcoming"):
             listing = "upcoming"
         elif heading.startswith("past"):
             listing = "past"
+        elif heading.startswith("current"):
+            listing = "current"
         elif heading.endswith("models") or heading == "":
             listing = "schedule"
-        for table in pipe_tables(section.body):
-            observations.extend(_deprecation_table_observations(table, source=ref, listing=listing))
+        for table in _google_tables(section.body):
+            observations.extend(
+                _deprecation_table_observations(
+                    table,
+                    source=ref,
+                    listing=listing,
+                    retired_listing=retired_scope_level is not None,
+                )
+            )
     if not observations:
         raise GoogleParseError("Google deprecations page did not list any models")
     return tuple(observations)
@@ -382,6 +435,7 @@ def _deprecation_table_observations(
     *,
     source: GoogleSourceRef,
     listing: str,
+    retired_listing: bool = False,
 ) -> tuple[GoogleModelObservation, ...]:
     observations: list[GoogleModelObservation] = []
     for row in table:
@@ -398,6 +452,7 @@ def _deprecation_table_observations(
                     provider_model_id=model_id,
                     source=source,
                     deprecation_listing=listing,
+                    lifecycle=GoogleLifecycle.RETIRED if retired_listing else None,
                     replacements=replacements or None,
                 )
             )
@@ -420,7 +475,10 @@ def _parse_model_page(source: CapturedSource) -> tuple[GoogleModelObservation, .
     tokens = properties.get("token limits", "")
     max_input = _token_limit(tokens, _MAX_INPUT_LABELS)
     max_output = _token_limit(tokens, _MAX_OUTPUT_LABELS)
+    output_limit_unrepresentable = _has_unrepresentable_output_limit(tokens)
+    _reject_malformed_token_limits(tokens, max_input=max_input, max_output=max_output)
     context_window = _context_window_tokens(properties)
+    context_window_is_combined = _has_unified_context_window(tokens)
     capabilities = properties.get("capabilities", "")
     tool_calling = _capability_flag(capabilities, ("function calling",))
     structured_output = _capability_flag(capabilities, ("structured outputs", "structured output"))
@@ -443,8 +501,10 @@ def _parse_model_page(source: CapturedSource) -> tuple[GoogleModelObservation, .
                 lifecycle=warning_lifecycle,
                 retirement_at=warning_retirement,
                 context_window_tokens=context_window,
+                context_window_is_combined=context_window_is_combined,
                 max_input_tokens=max_input,
                 max_output_tokens=max_output,
+                output_limit_unrepresentable=output_limit_unrepresentable,
                 input_modalities=inputs,
                 output_modalities=outputs,
                 tool_calling=tool_calling,
@@ -483,9 +543,58 @@ def _parse_model_page(source: CapturedSource) -> tuple[GoogleModelObservation, .
     return tuple(extras)
 
 
+def _reject_malformed_token_limits(
+    raw: str,
+    *,
+    max_input: int | None,
+    max_output: int | None,
+) -> None:
+    """Fail an optional page when it states, but cannot parse, a token limit."""
+    text = _token_limit_validation_text(raw)
+    if not text or _EXPLICITLY_UNAVAILABLE.search(text):
+        return
+    labels = {normalize_heading(match.group(1)) for match in _TOKEN_LABEL.finditer(text)}
+    if any(label in _MAX_INPUT_LABELS for label in labels) and max_input is None:
+        raise GoogleParseError("Google model page has an unparseable input token limit")
+    max_output_field = any(label == "max output" for label, _value in _bold_fields(raw))
+    if any(label in _MAX_OUTPUT_LABELS for label in labels) and max_output is None:
+        raise GoogleParseError("Google model page has an unparseable output token limit")
+    if max_output_field and max_output is None and not _has_unrepresentable_output_limit(raw):
+        raise GoogleParseError("Google model page has an unparseable output token limit")
+
+
+def _has_unrepresentable_output_limit(raw: str) -> bool:
+    """Recognize documented output limits that cannot be one scalar fact."""
+    return any(
+        matcher.fullmatch(line.strip()) is not None
+        for line in raw.splitlines()
+        for matcher in (_CONDITIONAL_MAX_OUTPUT, _ZERO_OUTPUT_TOKEN_LIMIT)
+    )
+
+
+def _token_limit_validation_text(raw: str) -> str:
+    """Remove only recognized non-scalar evidence before strict validation."""
+    lines: list[str] = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if _ZERO_OUTPUT_TOKEN_LIMIT.fullmatch(stripped):
+            continue
+        # The unified-context label describes the context field; its incidental
+        # words "output token limit" must not become a scalar-output claim.
+        line = line.replace(
+            "Context window (unified input and output token limit)", "Context window"
+        )
+        lines.append(line)
+    return _visible_text("\n".join(lines))
+
+
+def _has_unified_context_window(raw: str) -> bool:
+    return any(label == _UNIFIED_CONTEXT_WINDOW_LABEL for label, _value in _bold_fields(raw))
+
+
 def _property_fields(body: str) -> dict[str, str]:
     values: dict[str, str] = {}
-    for table in pipe_tables(body):
+    for table in _google_tables(body):
         if not table:
             continue
         columns = {_header_key(key): key for key in table[0]}
@@ -494,12 +603,21 @@ def _property_fields(body: str) -> dict[str, str]:
         if property_key is None or description_key is None:
             continue
         for row in table:
-            name = normalize_heading(
+            name = _property_name(
                 strip_trailing_markdown_footnote(_visible_text(row.get(property_key, "")))
             )
             if name:
                 values[name] = row.get(description_key, "")
     return values
+
+
+def _property_name(raw: str) -> str:
+    """Normalize known AI Studio property labels, including rendered icons."""
+    name = normalize_heading(raw)
+    for label in ("model code", "supported data types", "token limits", "capabilities"):
+        if name == label or name.startswith(label) or name.endswith(f" {label}"):
+            return label
+    return name
 
 
 def _page_display_name(sections: tuple) -> str | None:
@@ -529,6 +647,16 @@ def _modalities_from_data_types(
 ) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None]:
     fields = _bold_fields(raw)
     if not fields:
+        matches = tuple(_DATA_TYPE_LABEL.finditer(_visible_text(raw)))
+        if matches:
+            inputs = None
+            outputs = None
+            for match in matches:
+                if match.group("label").lower().startswith("input"):
+                    inputs = _modality_tokens(match.group("value"))
+                else:
+                    outputs = _modality_tokens(match.group("value"))
+            return inputs, outputs
         return _modality_tokens(raw), None
     inputs = None
     outputs = None
@@ -545,6 +673,10 @@ def _token_limit(raw: str, labels: tuple[str, ...]) -> int | None:
     for label, value in fields:
         if label in labels:
             return _parse_tokens(value)
+    for match in _NAMED_TOKEN_LIMIT.finditer(_visible_text(raw)):
+        label = normalize_heading(match.group("label"))
+        if label in labels:
+            return _parse_tokens(match.group("value"))
     return None
 
 
@@ -573,6 +705,9 @@ def _labeled_or_explicit_context(raw: str) -> int | None:
     found = _token_limit(raw, tuple(_CONTEXT_WINDOW_LABELS))
     if found is not None:
         return found
+    for label, value in _bold_fields(raw):
+        if label == _UNIFIED_CONTEXT_WINDOW_LABEL:
+            return _parse_tokens(value)
     match = _EXPLICIT_CONTEXT_WINDOW.search(_visible_text(raw))
     if match is None:
         return None
@@ -580,10 +715,16 @@ def _labeled_or_explicit_context(raw: str) -> int | None:
 
 
 def _capability_flag(raw: str, names: tuple[str, ...]) -> bool | None:
+    for match in _CAPABILITY_BADGE.finditer(raw):
+        if normalize_heading(match.group("label")) in names:
+            return match.group("state").lower() == "supported"
     for label, value in _bold_fields(raw):
         if label not in names:
             continue
         return _bool_status(value)
+    for match in _CAPABILITY_STATUS.finditer(_visible_text(raw)):
+        if normalize_heading(match.group("label")) in names:
+            return _bool_status(match.group("value"))
     return None
 
 
@@ -735,7 +876,7 @@ def _page_slug_from_href(href: str) -> str | None:
         return None
     parsed = urlparse(raw)
     host = (parsed.hostname or "").lower()
-    if host and host != "ai.google.dev":
+    if host and host != "aistudio.google.com":
         return None
     path = parsed.path or raw.split("#", 1)[0].split("?", 1)[0]
     match = _MODEL_PAGE_PATH.fullmatch(path)
@@ -750,7 +891,8 @@ def _page_slug_from_href(href: str) -> str | None:
 
 
 def _visible_text(raw: str) -> str:
-    text = _LINK.sub(r"\1", raw or "")
+    text = re.sub(r"\{%.*?%\}", "", raw or "", flags=re.DOTALL)
+    text = _LINK.sub(r"\1", text)
     text = re.sub(r"`([^`]+)`", r"\1", text)
     text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
     return " ".join(text.split())
@@ -758,3 +900,88 @@ def _visible_text(raw: str) -> str:
 
 def _header_key(raw: str) -> str:
     return normalize_heading(_visible_text(raw))
+
+
+def _section_heading(raw: str) -> str:
+    """Normalize headings after removing AI Studio heading-id directives."""
+    return normalize_heading(re.sub(r"\{%.*?%\}", "", raw, flags=re.DOTALL))
+
+
+def _google_tables(text: str) -> tuple[tuple[dict[str, str], ...], ...]:
+    """Read only pipe tables and AI Studio's documented ``{% table %}`` blocks.
+
+    Directive tables are intentionally not generalized Markdown: a header row
+    and each data row must be ordered bullet cells separated by ``---``.
+    This prevents unrelated directive content from becoming model evidence.
+    """
+    return pipe_tables(text) + _directive_tables(text)
+
+
+def _directive_tables(text: str) -> tuple[tuple[dict[str, str], ...], ...]:
+    tables: list[tuple[dict[str, str], ...]] = []
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    index = 0
+    while index < len(lines):
+        if not re.match(r"^\s*\{%\s*table(?:\s+[^%]*)?%\}\s*$", lines[index]):
+            index += 1
+            continue
+        start = index
+        index += 1
+        block: list[str] = []
+        while index < len(lines) and not re.match(r"^\s*\{%\s*/table\s*%\}\s*$", lines[index]):
+            if re.match(r"^\s*\{%\s*table(?:\s+[^%]*)?%\}\s*$", lines[index]):
+                raise GoogleParseError("Google directive table contains an ambiguous nested table")
+            block.append(lines[index])
+            index += 1
+        if index == len(lines):
+            raise GoogleParseError("Google directive table is missing its closing tag")
+        index += 1
+        parsed = _parse_directive_table(block)
+        if not parsed:
+            raise GoogleParseError(f"Google directive table at line {start + 1} is malformed")
+        tables.append(parsed)
+    return tuple(tables)
+
+
+def _parse_directive_table(lines: list[str]) -> tuple[dict[str, str], ...]:
+    bullet_lines = [
+        (len(raw) - len(raw.lstrip(" ")), raw) for raw in lines if _DIRECTIVE_BULLET.match(raw)
+    ]
+    if not bullet_lines:
+        return ()
+    base_indent = min(indent for indent, _raw in bullet_lines)
+    groups: list[list[str]] = [[]]
+    cell_lines: list[str] | None = None
+    for raw in lines:
+        stripped = raw.strip()
+        indent = len(raw) - len(raw.lstrip(" "))
+        bullet = _DIRECTIVE_CELL.match(raw)
+        if re.fullmatch(r"-{3,}", stripped):
+            if indent != base_indent or cell_lines is None or not groups[-1]:
+                return ()
+            cell_lines = None
+            groups.append([])
+            continue
+        if bullet is not None and indent == base_indent:
+            cell_lines = [bullet.group(1).strip()]
+            groups[-1].append(cell_lines)
+            continue
+        if cell_lines is None:
+            if stripped:
+                return ()
+            continue
+        cell_lines.append(raw.strip())
+    groups = [group for group in groups if group]
+    if len(groups) < 2:
+        return ()
+    headers = ["\n".join(cell).strip() for cell in groups[0]]
+    if not headers or len({_header_key(header) for header in headers}) != len(headers):
+        return ()
+    rows = groups[1:]
+    if any(len(group) != len(headers) for group in rows):
+        return ()
+    rows = tuple(
+        {header: "\n".join(cell).strip() for header, cell in zip(headers, group, strict=True)}
+        for group in rows
+    )
+    return rows

@@ -24,6 +24,7 @@ from samyak.model.errors import (
     ModelCatalogError,
 )
 from samyak.model.facts import FactStatus
+from samyak.model.historical_evidence import reconcile_historical_specifications
 from samyak.model.history import history_events_from_changes
 from samyak.model.http import Clock, HttpTransport
 from samyak.model.lifecycle import LifecycleChange, diff_provider_lifecycle
@@ -444,6 +445,12 @@ def _commit_provider_catalog(
                 provider_id=provider_id,
                 notices=refresh.notices,
             )
+            if provider_id == PROVIDER_GOOGLE:
+                incoming = reconcile_historical_specifications(
+                    previous,
+                    incoming,
+                    provider_id=provider_id,
+                )
             if provider_id == PROVIDER_FIREWORKS:
                 incoming = _retain_absent_fireworks_records(
                     previous,
